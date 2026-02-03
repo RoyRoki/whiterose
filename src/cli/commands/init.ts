@@ -1,0 +1,270 @@
+import * as p from '@clack/prompts';
+import chalk from 'chalk';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { WhiteroseConfig, ProviderType, CodebaseUnderstanding } from '../../types.js';
+import { detectProvider } from '../../providers/detect.js';
+import { getProvider } from '../../providers/index.js';
+import { scanCodebase } from '../../core/scanner/index.js';
+import { generateIntentDocument } from '../../core/contracts/intent.js';
+import YAML from 'yaml';
+
+interface InitOptions {
+  provider: string;
+  skipQuestions: boolean;
+  force: boolean;
+}
+
+export async function initCommand(options: InitOptions): Promise<void> {
+  const cwd = process.cwd();
+  const whiterosePath = join(cwd, '.whiterose');
+
+  // Check if already initialized
+  if (existsSync(whiterosePath) && !options.force) {
+    p.log.error('whiterose is already initialized in this directory.');
+    p.log.info('Use --force to reinitialize, or run "whiterose refresh" to update understanding.');
+    process.exit(1);
+  }
+
+  p.intro(chalk.red('whiterose') + chalk.dim(' - initialization'));
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 1: Detect available providers
+  // ─────────────────────────────────────────────────────────────
+  const providerSpinner = p.spinner();
+  providerSpinner.start('Detecting available LLM providers...');
+
+  const availableProviders = await detectProvider();
+
+  if (availableProviders.length === 0) {
+    providerSpinner.stop('No LLM providers detected');
+    p.log.error('whiterose requires an LLM provider to function.');
+    p.log.info('Supported providers: claude-code, aider, codex, opencode');
+    p.log.info('Install one and ensure it\'s configured, then run init again.');
+    process.exit(1);
+  }
+
+  providerSpinner.stop(`Detected providers: ${availableProviders.join(', ')}`);
+
+  // Select provider
+  let selectedProvider: ProviderType;
+  if (options.skipQuestions) {
+    selectedProvider = availableProviders[0] as ProviderType;
+  } else if (availableProviders.length === 1) {
+    selectedProvider = availableProviders[0] as ProviderType;
+    p.log.info(`Using ${selectedProvider} as your LLM provider.`);
+  } else {
+    const providerChoice = await p.select({
+      message: 'Multiple providers detected. Which should whiterose use?',
+      options: availableProviders.map((p) => ({
+        value: p,
+        label: p,
+        hint: p === 'claude-code' ? 'recommended' : undefined,
+      })),
+    });
+
+    if (p.isCancel(providerChoice)) {
+      p.cancel('Initialization cancelled.');
+      process.exit(0);
+    }
+
+    selectedProvider = providerChoice as ProviderType;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 2: Full codebase scan
+  // ─────────────────────────────────────────────────────────────
+  const scanSpinner = p.spinner();
+  scanSpinner.start('Scanning codebase...');
+
+  let codebaseFiles: string[];
+  try {
+    codebaseFiles = await scanCodebase(cwd);
+    scanSpinner.stop(`Found ${codebaseFiles.length} source files`);
+  } catch (error) {
+    scanSpinner.stop('Failed to scan codebase');
+    p.log.error(String(error));
+    process.exit(1);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 3: Generate understanding via LLM
+  // ─────────────────────────────────────────────────────────────
+  const understandingSpinner = p.spinner();
+  understandingSpinner.start('Analyzing codebase with AI...');
+
+  let understanding: CodebaseUnderstanding;
+  try {
+    const provider = await getProvider(selectedProvider);
+    understanding = await provider.generateUnderstanding(codebaseFiles);
+    understandingSpinner.stop('Codebase analysis complete');
+  } catch (error) {
+    understandingSpinner.stop('Failed to analyze codebase');
+    p.log.error(String(error));
+    process.exit(1);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 4: Show summary and confirm understanding
+  // ─────────────────────────────────────────────────────────────
+  if (!options.skipQuestions) {
+    p.log.message(chalk.bold('\nHere\'s what I understand about your codebase:\n'));
+    p.log.message(`  ${chalk.cyan('Type:')} ${understanding.summary.type}`);
+    p.log.message(`  ${chalk.cyan('Framework:')} ${understanding.summary.framework || 'None detected'}`);
+    p.log.message(`  ${chalk.cyan('Language:')} ${understanding.summary.language}`);
+    p.log.message(`  ${chalk.cyan('Files:')} ${understanding.structure.totalFiles}`);
+    p.log.message(`  ${chalk.cyan('Lines:')} ${understanding.structure.totalLines.toLocaleString()}`);
+    p.log.message(`\n  ${chalk.dim(understanding.summary.description)}\n`);
+
+    if (understanding.features.length > 0) {
+      p.log.message(chalk.bold('Detected features:'));
+      for (const feature of understanding.features.slice(0, 5)) {
+        p.log.message(`  ${chalk.yellow('●')} ${feature.name} - ${chalk.dim(feature.description)}`);
+      }
+      if (understanding.features.length > 5) {
+        p.log.message(`  ${chalk.dim(`...and ${understanding.features.length - 5} more`)}`);
+      }
+      console.log();
+    }
+
+    const isAccurate = await p.confirm({
+      message: 'Is this understanding accurate?',
+      initialValue: true,
+    });
+
+    if (p.isCancel(isAccurate)) {
+      p.cancel('Initialization cancelled.');
+      process.exit(0);
+    }
+
+    if (!isAccurate) {
+      p.log.info('You can edit .whiterose/intent.md after initialization to correct the understanding.');
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase 5: Priority questions based on detected features
+    // ─────────────────────────────────────────────────────────────
+    const priorities: Record<string, 'critical' | 'high' | 'medium' | 'low' | 'ignore'> = {};
+
+    // Ask about critical features
+    for (const feature of understanding.features.filter((f) => f.priority === 'critical').slice(0, 3)) {
+      const priority = await p.select({
+        message: `I detected ${chalk.bold(feature.name)}. How should I prioritize bugs here?`,
+        options: [
+          { value: 'critical', label: 'Critical', hint: 'highest priority' },
+          { value: 'high', label: 'High' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'low', label: 'Low' },
+          { value: 'ignore', label: 'Ignore', hint: 'skip this area' },
+        ],
+        initialValue: 'critical',
+      });
+
+      if (p.isCancel(priority)) {
+        p.cancel('Initialization cancelled.');
+        process.exit(0);
+      }
+
+      // Map feature to file patterns
+      for (const file of feature.relatedFiles) {
+        priorities[file] = priority as typeof priorities[string];
+      }
+    }
+
+    // Ask about areas of concern
+    const areasOfConcern = await p.text({
+      message: 'Any specific files or directories you want me to focus on? (comma-separated, or leave empty)',
+      placeholder: 'src/api/checkout.ts, src/hooks/useAuth.ts',
+    });
+
+    if (!p.isCancel(areasOfConcern) && areasOfConcern) {
+      for (const area of areasOfConcern.split(',').map((s) => s.trim())) {
+        priorities[area] = 'critical';
+      }
+    }
+
+    // Store priorities in understanding for config generation
+    (understanding as any)._userPriorities = priorities;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 6: Create .whiterose directory and files
+  // ─────────────────────────────────────────────────────────────
+  const writeSpinner = p.spinner();
+  writeSpinner.start('Creating configuration...');
+
+  try {
+    // Create directory structure
+    mkdirSync(join(whiterosePath, 'cache'), { recursive: true });
+    mkdirSync(join(whiterosePath, 'reports'), { recursive: true });
+
+    // Generate config
+    const config: WhiteroseConfig = {
+      version: '1',
+      provider: selectedProvider,
+      include: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'],
+      exclude: ['node_modules', 'dist', 'build', '.next', 'coverage', '**/*.test.*', '**/*.spec.*'],
+      priorities: (understanding as any)._userPriorities || {},
+      categories: ['logic-error', 'security', 'async-race-condition', 'edge-case', 'null-reference'],
+      minConfidence: 'low',
+      staticAnalysis: {
+        typescript: true,
+        eslint: true,
+      },
+      output: {
+        sarif: true,
+        markdown: true,
+        sarifPath: '.whiterose/reports',
+        markdownPath: 'BUGS.md',
+      },
+    };
+
+    // Write config.yml
+    writeFileSync(join(whiterosePath, 'config.yml'), YAML.stringify(config), 'utf-8');
+
+    // Write understanding cache
+    writeFileSync(
+      join(whiterosePath, 'cache', 'understanding.json'),
+      JSON.stringify(understanding, null, 2),
+      'utf-8'
+    );
+
+    // Generate and write intent.md
+    const intentDoc = generateIntentDocument(understanding);
+    writeFileSync(join(whiterosePath, 'intent.md'), intentDoc, 'utf-8');
+
+    // Initialize file hashes cache
+    writeFileSync(
+      join(whiterosePath, 'cache', 'file-hashes.json'),
+      JSON.stringify({ version: '1', fileHashes: [], lastFullScan: null }, null, 2),
+      'utf-8'
+    );
+
+    // Add to .gitignore if it exists
+    const gitignorePath = join(cwd, '.gitignore');
+    if (existsSync(gitignorePath)) {
+      const gitignore = await import('fs').then((fs) => fs.readFileSync(gitignorePath, 'utf-8'));
+      if (!gitignore.includes('.whiterose/cache')) {
+        writeFileSync(gitignorePath, gitignore + '\n# whiterose cache\n.whiterose/cache/\n', 'utf-8');
+      }
+    }
+
+    writeSpinner.stop('Configuration created');
+  } catch (error) {
+    writeSpinner.stop('Failed to create configuration');
+    p.log.error(String(error));
+    process.exit(1);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Done
+  // ─────────────────────────────────────────────────────────────
+  p.outro(chalk.green('whiterose initialized successfully!'));
+
+  console.log();
+  console.log(chalk.dim('  Next steps:'));
+  console.log(chalk.dim('  1. Review .whiterose/intent.md and edit if needed'));
+  console.log(chalk.dim('  2. Run ') + chalk.cyan('whiterose scan') + chalk.dim(' to find bugs'));
+  console.log(chalk.dim('  3. Run ') + chalk.cyan('whiterose fix') + chalk.dim(' to fix them interactively'));
+  console.log();
+}
