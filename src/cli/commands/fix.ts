@@ -1,8 +1,9 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import { existsSync, readFileSync, readdirSync } from 'fs';
-import { join } from 'path';
-import { Bug, ScanResult } from '../../types.js';
+import { join, resolve, isAbsolute } from 'path';
+import { execa } from 'execa';
+import { Bug } from '../../types.js';
 import { loadConfig } from '../../core/config.js';
 import { startFixTUI } from '../../tui/index.js';
 import { applyFix } from '../../core/fixer.js';
@@ -10,16 +11,95 @@ import { applyFix } from '../../core/fixer.js';
 interface FixOptions {
   dryRun: boolean;
   branch?: string;
+  sarif?: string;
+  github?: string;
+  describe?: boolean;
 }
 
 export async function fixCommand(bugId: string | undefined, options: FixOptions): Promise<void> {
   const cwd = process.cwd();
   const whiterosePath = join(cwd, '.whiterose');
 
+  // ─────────────────────────────────────────────────────────────
+  // Source 1: External SARIF file
+  // ─────────────────────────────────────────────────────────────
+  if (options.sarif) {
+    const sarifPath = isAbsolute(options.sarif) ? options.sarif : resolve(cwd, options.sarif);
+
+    if (!existsSync(sarifPath)) {
+      p.log.error(`SARIF file not found: ${sarifPath}`);
+      process.exit(1);
+    }
+
+    p.intro(chalk.red('whiterose') + chalk.dim(' - fixing bugs from external SARIF'));
+
+    const bugs = loadBugsFromSarif(sarifPath);
+    if (bugs.length === 0) {
+      p.log.success('No bugs found in SARIF file!');
+      process.exit(0);
+    }
+
+    p.log.info(`Loaded ${bugs.length} bugs from ${options.sarif}`);
+
+    // Load config if available (for fix options), or use defaults
+    const config = existsSync(whiterosePath)
+      ? await loadConfig(cwd)
+      : getDefaultConfig();
+
+    return await processBugList(bugs, config, options, bugId);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Source 2: GitHub issue
+  // ─────────────────────────────────────────────────────────────
+  if (options.github) {
+    p.intro(chalk.red('whiterose') + chalk.dim(' - fixing bug from GitHub issue'));
+
+    const bug = await loadBugFromGitHub(options.github, cwd);
+    if (!bug) {
+      p.log.error('Failed to parse GitHub issue as a bug');
+      process.exit(1);
+    }
+
+    p.log.info(`Loaded bug from GitHub: ${bug.title}`);
+
+    const config = existsSync(whiterosePath)
+      ? await loadConfig(cwd)
+      : getDefaultConfig();
+
+    return await fixSingleBug(bug, config, options);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Source 3: Manual description (interactive)
+  // ─────────────────────────────────────────────────────────────
+  if (options.describe) {
+    p.intro(chalk.red('whiterose') + chalk.dim(' - fixing manually described bug'));
+
+    const bug = await collectManualBugDescription(cwd);
+    if (!bug) {
+      p.cancel('Bug description cancelled.');
+      process.exit(0);
+    }
+
+    const config = existsSync(whiterosePath)
+      ? await loadConfig(cwd)
+      : getDefaultConfig();
+
+    return await fixSingleBug(bug, config, options);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Source 4: Default - whiterose scan results
+  // ─────────────────────────────────────────────────────────────
+
   // Check if initialized
   if (!existsSync(whiterosePath)) {
     p.log.error('whiterose is not initialized in this directory.');
-    p.log.info('Run "whiterose init" first.');
+    p.log.info('Run "whiterose init" first, or use:');
+    p.log.info('  --sarif <path>   Fix bugs from an external SARIF file');
+    p.log.info('  --github <url>   Fix bug from a GitHub issue');
+    p.log.info('  --describe       Manually describe a bug to fix');
     process.exit(1);
   }
 
@@ -30,6 +110,7 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
   const reportsDir = join(whiterosePath, 'reports');
   if (!existsSync(reportsDir)) {
     p.log.error('No scan results found. Run "whiterose scan" first.');
+    p.log.info('Or use --sarif, --github, or --describe for external bugs.');
     process.exit(1);
   }
 
@@ -41,14 +122,24 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
 
   if (reports.length === 0) {
     p.log.error('No scan results found. Run "whiterose scan" first.');
+    p.log.info('Or use --sarif, --github, or --describe for external bugs.');
     process.exit(1);
   }
 
   const latestReport = join(reportsDir, reports[0]);
-  const sarif = JSON.parse(readFileSync(latestReport, 'utf-8'));
+  const bugs = loadBugsFromSarif(latestReport);
 
-  // Convert SARIF back to bugs
-  const bugs: Bug[] = sarif.runs?.[0]?.results?.map((r: any, i: number) => {
+  return await processBugList(bugs, config, options, bugId);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Bug Loading Functions
+// ─────────────────────────────────────────────────────────────
+
+function loadBugsFromSarif(sarifPath: string): Bug[] {
+  const sarif = JSON.parse(readFileSync(sarifPath, 'utf-8'));
+
+  return sarif.runs?.[0]?.results?.map((r: any, i: number) => {
     // Try to extract full bug info from SARIF properties if available
     const props = r.properties || {};
 
@@ -81,7 +172,211 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
       createdAt: new Date().toISOString(),
     };
   }) || [];
+}
 
+async function loadBugFromGitHub(issueUrl: string, cwd: string): Promise<Bug | null> {
+  try {
+    // Parse the issue URL: https://github.com/owner/repo/issues/123
+    const match = issueUrl.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+    if (!match) {
+      p.log.error('Invalid GitHub issue URL format. Expected: https://github.com/owner/repo/issues/123');
+      return null;
+    }
+
+    const [, owner, repo, issueNumber] = match;
+
+    // Use gh CLI to fetch issue details
+    const { stdout } = await execa('gh', [
+      'issue', 'view', issueNumber,
+      '--repo', `${owner}/${repo}`,
+      '--json', 'title,body,labels'
+    ], { cwd });
+
+    const issue = JSON.parse(stdout);
+
+    // Parse file and line from issue body (common patterns)
+    const fileMatch = issue.body?.match(/(?:file|path|location):\s*[`"]?([^\s`"]+)[`"]?/i) ||
+                      issue.body?.match(/```[\w]*\n(?:\/\/|#)\s*([^\s:]+):(\d+)/);
+    const lineMatch = issue.body?.match(/(?:line|L|:)(\d+)/);
+
+    // Determine severity from labels
+    let severity: 'critical' | 'high' | 'medium' | 'low' = 'medium';
+    const labels = issue.labels?.map((l: any) => l.name.toLowerCase()) || [];
+    if (labels.some((l: string) => l.includes('critical') || l.includes('security'))) {
+      severity = 'critical';
+    } else if (labels.some((l: string) => l.includes('bug') || l.includes('high'))) {
+      severity = 'high';
+    } else if (labels.some((l: string) => l.includes('low') || l.includes('minor'))) {
+      severity = 'low';
+    }
+
+    // Determine category from labels
+    let category: Bug['category'] = 'logic-error';
+    if (labels.some((l: string) => l.includes('security'))) {
+      category = 'security';
+    } else if (labels.some((l: string) => l.includes('null') || l.includes('undefined'))) {
+      category = 'null-reference';
+    } else if (labels.some((l: string) => l.includes('async') || l.includes('race'))) {
+      category = 'async-race-condition';
+    }
+
+    return {
+      id: `GH-${issueNumber}`,
+      title: issue.title,
+      description: issue.body || issue.title,
+      file: fileMatch?.[1] || '',
+      line: parseInt(lineMatch?.[1] || '1', 10),
+      severity,
+      category,
+      confidence: {
+        overall: 'medium',
+        codePathValidity: 0.5,
+        reachability: 0.5,
+        intentViolation: false,
+        staticToolSignal: false,
+        adversarialSurvived: false,
+      },
+      codePath: [],
+      evidence: [`GitHub issue: ${issueUrl}`],
+      createdAt: new Date().toISOString(),
+    };
+  } catch (error: any) {
+    if (error.message?.includes('gh')) {
+      p.log.error('GitHub CLI (gh) is required for --github option.');
+      p.log.info('Install it: https://cli.github.com/');
+    } else {
+      p.log.error(`Failed to fetch GitHub issue: ${error.message}`);
+    }
+    return null;
+  }
+}
+
+async function collectManualBugDescription(cwd: string): Promise<Bug | null> {
+  // Get file path
+  const file = await p.text({
+    message: 'File path containing the bug:',
+    placeholder: 'src/components/Button.tsx',
+    validate: (value) => {
+      if (!value) return 'File path is required';
+      const fullPath = isAbsolute(value) ? value : resolve(cwd, value);
+      if (!existsSync(fullPath)) return `File not found: ${value}`;
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(file)) return null;
+
+  // Get line number
+  const lineStr = await p.text({
+    message: 'Line number (approximate is fine):',
+    placeholder: '42',
+    validate: (value) => {
+      if (!value) return 'Line number is required';
+      if (isNaN(parseInt(value, 10))) return 'Must be a number';
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(lineStr)) return null;
+
+  // Get bug title
+  const title = await p.text({
+    message: 'Bug title (brief description):',
+    placeholder: 'Null reference when user is not logged in',
+  });
+
+  if (p.isCancel(title)) return null;
+
+  // Get detailed description
+  const description = await p.text({
+    message: 'Detailed description (what happens, how to trigger):',
+    placeholder: 'When user.profile is accessed before login check, TypeError is thrown',
+  });
+
+  if (p.isCancel(description)) return null;
+
+  // Get severity
+  const severity = await p.select({
+    message: 'Bug severity:',
+    options: [
+      { value: 'critical', label: 'Critical', hint: 'security issue, data loss' },
+      { value: 'high', label: 'High', hint: 'crash, incorrect behavior' },
+      { value: 'medium', label: 'Medium', hint: 'bug with workaround' },
+      { value: 'low', label: 'Low', hint: 'minor issue' },
+    ],
+    initialValue: 'medium',
+  });
+
+  if (p.isCancel(severity)) return null;
+
+  // Get category
+  const category = await p.select({
+    message: 'Bug category:',
+    options: [
+      { value: 'logic-error', label: 'Logic Error' },
+      { value: 'null-reference', label: 'Null Reference' },
+      { value: 'security', label: 'Security' },
+      { value: 'async-race-condition', label: 'Async/Race Condition' },
+      { value: 'edge-case', label: 'Edge Case' },
+      { value: 'type-coercion', label: 'Type Coercion' },
+      { value: 'resource-leak', label: 'Resource Leak' },
+      { value: 'intent-violation', label: 'Intent Violation' },
+    ],
+    initialValue: 'logic-error',
+  });
+
+  if (p.isCancel(category)) return null;
+
+  const filePath = isAbsolute(file) ? file : resolve(cwd, file);
+  const relativePath = filePath.startsWith(cwd) ? filePath.slice(cwd.length + 1) : filePath;
+
+  return {
+    id: `MANUAL-${Date.now()}`,
+    title: title || 'Manual bug',
+    description: description || title || 'Manual bug',
+    file: relativePath,
+    line: parseInt(lineStr || '1', 10),
+    severity: severity as Bug['severity'],
+    category: category as Bug['category'],
+    confidence: {
+      overall: 'high', // User-reported bugs are high confidence
+      codePathValidity: 1,
+      reachability: 1,
+      intentViolation: true,
+      staticToolSignal: false,
+      adversarialSurvived: false,
+    },
+    codePath: [],
+    evidence: ['Manually reported by user'],
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function getDefaultConfig() {
+  // Return minimal config for external bug sources when whiterose isn't initialized
+  return {
+    version: '1',
+    provider: 'claude-code' as const,
+    include: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'],
+    exclude: ['node_modules', 'dist', 'build'],
+    priorities: {},
+    categories: ['logic-error', 'security', 'null-reference'],
+    minConfidence: 'low' as const,
+    staticAnalysis: { typescript: true, eslint: true },
+    output: { sarif: true, markdown: true, sarifPath: '.whiterose/reports', markdownPath: 'BUGS.md' },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// Bug Processing Functions
+// ─────────────────────────────────────────────────────────────
+
+async function processBugList(
+  bugs: Bug[],
+  config: any,
+  options: FixOptions,
+  bugId: string | undefined
+): Promise<void> {
   if (bugs.length === 0) {
     p.log.success('No bugs to fix!');
     process.exit(0);
@@ -96,78 +391,7 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
       process.exit(1);
     }
 
-    p.intro(chalk.red('whiterose') + chalk.dim(' - fixing bug'));
-
-    // Show bug details
-    console.log();
-    console.log(chalk.bold(`  ${bug.id}: ${bug.title}`));
-    console.log(`  ${chalk.dim('File:')} ${bug.file}:${bug.line}`);
-    console.log(`  ${chalk.dim('Severity:')} ${bug.severity}`);
-    console.log();
-    console.log(`  ${bug.description}`);
-    console.log();
-
-    if (bug.suggestedFix) {
-      console.log(chalk.dim('  Suggested fix:'));
-      console.log(`  ${chalk.green(bug.suggestedFix)}`);
-      console.log();
-    }
-
-    // Confirm fix
-    if (!options.dryRun) {
-      const confirm = await p.confirm({
-        message: 'Apply this fix?',
-        initialValue: true,
-      });
-
-      if (p.isCancel(confirm) || !confirm) {
-        p.cancel('Fix cancelled.');
-        process.exit(0);
-      }
-    }
-
-    // Apply fix
-    const spinner = p.spinner();
-    spinner.start(options.dryRun ? 'Generating fix preview...' : 'Applying fix...');
-
-    try {
-      const result = await applyFix(bug, config, options);
-
-      if (result.success) {
-        spinner.stop(options.dryRun ? 'Fix preview generated' : 'Fix applied');
-
-        if (result.diff) {
-          console.log();
-          console.log(chalk.dim('  Changes:'));
-          for (const line of result.diff.split('\n')) {
-            if (line.startsWith('+')) {
-              console.log(chalk.green(`  ${line}`));
-            } else if (line.startsWith('-')) {
-              console.log(chalk.red(`  ${line}`));
-            } else {
-              console.log(chalk.dim(`  ${line}`));
-            }
-          }
-          console.log();
-        }
-
-        if (result.branchName) {
-          p.log.info(`Changes committed to branch: ${result.branchName}`);
-        }
-
-        p.outro(chalk.green('Fix complete!'));
-      } else {
-        spinner.stop('Fix failed');
-        p.log.error(result.error || 'Unknown error');
-        process.exit(1);
-      }
-    } catch (error: any) {
-      spinner.stop('Fix failed');
-      p.log.error(error.message);
-      process.exit(1);
-    }
-
-    return;
+    return await fixSingleBug(bug, config, options);
   }
 
   // Launch interactive TUI
@@ -185,6 +409,94 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
     } else {
       throw error;
     }
+  }
+}
+
+async function fixSingleBug(bug: Bug, config: any, options: FixOptions): Promise<void> {
+  p.intro(chalk.red('whiterose') + chalk.dim(' - fixing bug'));
+
+  // Check if file is specified (needed for fixing)
+  if (!bug.file) {
+    const file = await p.text({
+      message: 'File path containing the bug (required for fix):',
+      placeholder: 'src/components/Button.tsx',
+    });
+
+    if (p.isCancel(file) || !file) {
+      p.cancel('Fix cancelled - file path required.');
+      process.exit(0);
+    }
+
+    bug.file = file;
+  }
+
+  // Show bug details
+  console.log();
+  console.log(chalk.bold(`  ${bug.id}: ${bug.title}`));
+  console.log(`  ${chalk.dim('File:')} ${bug.file}:${bug.line}`);
+  console.log(`  ${chalk.dim('Severity:')} ${bug.severity}`);
+  console.log();
+  console.log(`  ${bug.description}`);
+  console.log();
+
+  if (bug.suggestedFix) {
+    console.log(chalk.dim('  Suggested fix:'));
+    console.log(`  ${chalk.green(bug.suggestedFix)}`);
+    console.log();
+  }
+
+  // Confirm fix
+  if (!options.dryRun) {
+    const confirm = await p.confirm({
+      message: 'Apply this fix?',
+      initialValue: true,
+    });
+
+    if (p.isCancel(confirm) || !confirm) {
+      p.cancel('Fix cancelled.');
+      process.exit(0);
+    }
+  }
+
+  // Apply fix
+  const spinner = p.spinner();
+  spinner.start(options.dryRun ? 'Generating fix preview...' : 'Applying fix...');
+
+  try {
+    const result = await applyFix(bug, config, options);
+
+    if (result.success) {
+      spinner.stop(options.dryRun ? 'Fix preview generated' : 'Fix applied');
+
+      if (result.diff) {
+        console.log();
+        console.log(chalk.dim('  Changes:'));
+        for (const line of result.diff.split('\n')) {
+          if (line.startsWith('+')) {
+            console.log(chalk.green(`  ${line}`));
+          } else if (line.startsWith('-')) {
+            console.log(chalk.red(`  ${line}`));
+          } else {
+            console.log(chalk.dim(`  ${line}`));
+          }
+        }
+        console.log();
+      }
+
+      if (result.branchName) {
+        p.log.info(`Changes committed to branch: ${result.branchName}`);
+      }
+
+      p.outro(chalk.green('Fix complete!'));
+    } else {
+      spinner.stop('Fix failed');
+      p.log.error(result.error || 'Unknown error');
+      process.exit(1);
+    }
+  } catch (error: any) {
+    spinner.stop('Fix failed');
+    p.log.error(error.message);
+    process.exit(1);
   }
 }
 

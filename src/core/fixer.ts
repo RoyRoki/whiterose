@@ -1,8 +1,41 @@
 import { execa } from 'execa';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { dirname, basename } from 'path';
+import { dirname, basename, resolve, relative, isAbsolute } from 'path';
 import { Bug, WhiteroseConfig } from '../types.js';
 import { createFixBranch, commitFix } from './git.js';
+
+/**
+ * Validates that a file path is within the project directory.
+ * Prevents path traversal attacks from malicious bug.file values.
+ */
+function isPathWithinProject(filePath: string, projectDir: string): boolean {
+  const resolvedPath = resolve(projectDir, filePath);
+  const relativePath = relative(projectDir, resolvedPath);
+
+  // Path is outside if it starts with '..' or is an absolute path
+  return !relativePath.startsWith('..') && !isAbsolute(relativePath);
+}
+
+/**
+ * Sanitizes and validates a file path for safe operations.
+ * Returns the resolved absolute path if valid, throws if invalid.
+ */
+function validateFilePath(filePath: string, projectDir: string): string {
+  // Resolve to absolute path
+  const resolvedPath = isAbsolute(filePath) ? filePath : resolve(projectDir, filePath);
+
+  // Check for path traversal
+  if (!isPathWithinProject(resolvedPath, projectDir)) {
+    throw new Error(`Security: Refusing to access file outside project directory: ${filePath}`);
+  }
+
+  // Check for suspicious patterns
+  if (filePath.includes('\0') || filePath.includes('..')) {
+    throw new Error(`Security: Invalid file path contains suspicious characters: ${filePath}`);
+  }
+
+  return resolvedPath;
+}
 
 interface FixOptions {
   dryRun: boolean;
@@ -22,16 +55,28 @@ export async function applyFix(
   options: FixOptions
 ): Promise<FixResult> {
   const { dryRun, branch } = options;
+  const projectDir = process.cwd();
+
+  // SECURITY: Validate file path to prevent path traversal
+  let safePath: string;
+  try {
+    safePath = validateFilePath(bug.file, projectDir);
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
 
   // Read the original file
-  if (!existsSync(bug.file)) {
+  if (!existsSync(safePath)) {
     return {
       success: false,
       error: `File not found: ${bug.file}`,
     };
   }
 
-  const originalContent = readFileSync(bug.file, 'utf-8');
+  const originalContent = readFileSync(safePath, 'utf-8');
   const lines = originalContent.split('\n');
 
   // If we have a suggested fix, try to apply it
@@ -46,7 +91,7 @@ export async function applyFix(
       diff = result.diff;
     } else {
       // Fall back to LLM-based fix
-      const llmResult = await generateAndApplyFix(bug, config, originalContent);
+      const llmResult = await generateAndApplyFix(bug, config, originalContent, safePath);
       if (!llmResult.success) {
         return llmResult;
       }
@@ -55,7 +100,7 @@ export async function applyFix(
     }
   } else {
     // No suggested fix, use LLM
-    const llmResult = await generateAndApplyFix(bug, config, originalContent);
+    const llmResult = await generateAndApplyFix(bug, config, originalContent, safePath);
     if (!llmResult.success) {
       return llmResult;
     }
@@ -80,8 +125,8 @@ export async function applyFix(
     branchName = await createFixBranch(branch, bug);
   }
 
-  // Write the fixed content
-  writeFileSync(bug.file, fixedContent, 'utf-8');
+  // Write the fixed content (using validated safe path)
+  writeFileSync(safePath, fixedContent, 'utf-8');
 
   // Commit the change
   if (branchName || !branch) {
@@ -143,11 +188,15 @@ function applySimpleFix(
 async function generateAndApplyFix(
   bug: Bug,
   _config: WhiteroseConfig,
-  originalContent: string
+  originalContent: string,
+  safePath?: string
 ): Promise<{ success: boolean; content?: string; diff?: string; error?: string }> {
   try {
     // Build a prompt for fixing
     const prompt = buildFixPrompt(bug, originalContent);
+
+    // Use validated path for cwd, fallback to process.cwd()
+    const workingDir = safePath ? dirname(safePath) : process.cwd();
 
     // Use the provider to generate a fix
     // We'll use execa directly since we need a specific prompt format
@@ -155,7 +204,7 @@ async function generateAndApplyFix(
       'claude',
       ['-p', prompt, '--output-format', 'text'],
       {
-        cwd: dirname(bug.file),
+        cwd: workingDir,
         timeout: 120000,
         env: { ...process.env, NO_COLOR: '1' },
       }

@@ -14,12 +14,13 @@ vi.mock('fs', () => ({
 
 vi.mock('../../../src/providers/detect', () => ({
   isProviderAvailable: vi.fn(),
+  getProviderCommand: vi.fn().mockReturnValue('aider'),
 }));
 
 import { execa } from 'execa';
 import { existsSync, readFileSync, mkdtempSync, rmSync } from 'fs';
 import { AiderProvider } from '../../../src/providers/adapters/aider';
-import { isProviderAvailable } from '../../../src/providers/detect';
+import { isProviderAvailable, getProviderCommand } from '../../../src/providers/detect';
 import { CodebaseUnderstanding } from '../../../src/types';
 
 describe('providers/adapters/aider', () => {
@@ -45,6 +46,7 @@ describe('providers/adapters/aider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getProviderCommand).mockReturnValue('aider');
     provider = new AiderProvider();
     vi.mocked(mkdtempSync).mockReturnValue('/tmp/whiterose-test');
   });

@@ -22,6 +22,10 @@ import { createFixBranch, commitFix } from '../../../src/core/git';
 import { applyFix, batchFix } from '../../../src/core/fixer';
 import { Bug, WhiteroseConfig } from '../../../src/types';
 
+// Mock process.cwd to return /project for path validation
+const originalCwd = process.cwd;
+vi.spyOn(process, 'cwd').mockReturnValue('/project');
+
 const mockBug: Bug = {
   id: 'WR-001',
   title: 'Null reference bug',
@@ -69,6 +73,8 @@ const mockConfig: WhiteroseConfig = {
 describe('core/fixer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Re-set cwd mock after clearAllMocks
+    vi.spyOn(process, 'cwd').mockReturnValue('/project');
   });
 
   afterEach(() => {
@@ -83,6 +89,42 @@ describe('core/fixer', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('File not found');
+    });
+
+    it('should reject path traversal attempts', async () => {
+      const maliciousBug = {
+        ...mockBug,
+        file: '../../../etc/passwd',
+      };
+
+      const result = await applyFix(maliciousBug, mockConfig, { dryRun: false });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Security');
+    });
+
+    it('should reject paths outside project directory', async () => {
+      const maliciousBug = {
+        ...mockBug,
+        file: '/etc/passwd',
+      };
+
+      const result = await applyFix(maliciousBug, mockConfig, { dryRun: false });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Security');
+    });
+
+    it('should reject paths with null bytes', async () => {
+      const maliciousBug = {
+        ...mockBug,
+        file: '/project/src/test.ts\x00.txt',
+      };
+
+      const result = await applyFix(maliciousBug, mockConfig, { dryRun: false });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Security');
     });
 
     it('should apply simple fix with suggested fix', async () => {

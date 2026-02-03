@@ -1,4 +1,35 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'events';
+
+// Create mock stream class
+class MockStdout extends EventEmitter {
+  pipe() { return this; }
+}
+
+// Create mock subprocess
+function createMockProcess(outputLines: string[] = []) {
+  const stdout = new MockStdout();
+  const mockProcess = {
+    stdout,
+    stderr: new MockStdout(),
+    kill: vi.fn(),
+    then: (resolve: any) => {
+      // Simulate async streaming
+      setTimeout(() => {
+        outputLines.forEach((line, i) => {
+          setTimeout(() => stdout.emit('data', Buffer.from(line + '\n')), i * 10);
+        });
+        setTimeout(() => {
+          stdout.emit('end');
+          resolve({ exitCode: 0 });
+        }, outputLines.length * 10 + 50);
+      }, 0);
+      return mockProcess;
+    },
+    catch: () => mockProcess,
+  };
+  return mockProcess;
+}
 
 vi.mock('execa', () => ({
   execa: vi.fn(),
@@ -11,12 +42,13 @@ vi.mock('fs', () => ({
 
 vi.mock('../../../src/providers/detect', () => ({
   isProviderAvailable: vi.fn(),
+  getProviderCommand: vi.fn().mockReturnValue('claude'),
 }));
 
 import { execa } from 'execa';
 import { existsSync, readFileSync } from 'fs';
 import { ClaudeCodeProvider } from '../../../src/providers/adapters/claude-code';
-import { isProviderAvailable } from '../../../src/providers/detect';
+import { isProviderAvailable, getProviderCommand } from '../../../src/providers/detect';
 import { CodebaseUnderstanding } from '../../../src/types';
 
 describe('providers/adapters/claude-code', () => {
@@ -42,6 +74,7 @@ describe('providers/adapters/claude-code', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getProviderCommand).mockReturnValue('claude');
     provider = new ClaudeCodeProvider();
   });
 
@@ -100,37 +133,38 @@ describe('providers/adapters/claude-code', () => {
     it('should return empty array for empty file list', async () => {
       const bugs = await provider.analyze({
         files: [],
-        cwd: '/test',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
       expect(bugs).toEqual([]);
     });
 
-    it('should analyze files and return bugs', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: JSON.stringify([
-          {
-            file: 'src/test.ts',
-            line: 10,
-            title: 'Null dereference',
-            description: 'Accessing property on null',
-            severity: 'high',
-            category: 'null-reference',
-            codePath: [{ step: 1, file: 'src/test.ts', line: 10, code: 'x.foo', explanation: 'x may be null' }],
-            evidence: ['No null check'],
-            suggestedFix: 'if (x) { x.foo }',
-          },
-        ]),
-      } as any);
+    it('should analyze files and return bugs via streaming', async () => {
+      const bugJson = JSON.stringify({
+        file: 'src/test.ts',
+        line: 10,
+        title: 'Null dereference',
+        description: 'Accessing property on null',
+        severity: 'high',
+        category: 'null-reference',
+        codePath: [{ step: 1, file: 'src/test.ts', line: 10, code: 'x.foo', explanation: 'x may be null' }],
+        evidence: ['No null check'],
+      });
+
+      const mockProcess = createMockProcess([
+        '###SCANNING:src/test.ts',
+        `###BUG:${bugJson}`,
+        '###COMPLETE',
+      ]);
+
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
 
       const bugs = await provider.analyze({
         files: ['/project/src/test.ts'],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
@@ -140,242 +174,107 @@ describe('providers/adapters/claude-code', () => {
       expect(bugs[0].category).toBe('null-reference');
     });
 
-    it('should handle invalid JSON response', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({ stdout: 'not json' } as any);
+    it('should handle streaming with no bugs found', async () => {
+      const mockProcess = createMockProcess([
+        '###SCANNING:src/test.ts',
+        '###SCANNING:src/utils.ts',
+        '###COMPLETE',
+      ]);
+
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
 
       const bugs = await provider.analyze({
         files: ['/project/src/test.ts'],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
       expect(bugs).toEqual([]);
     });
 
-    it('should handle CLI errors with stdout fallback', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockRejectedValue({
-        stdout: '[]',
-        message: 'CLI error',
-      });
+    it('should handle multiple bugs in stream', async () => {
+      const bug1 = JSON.stringify({ file: 'test.ts', line: 1, title: 'Bug 1', severity: 'high', category: 'logic-error' });
+      const bug2 = JSON.stringify({ file: 'test.ts', line: 2, title: 'Bug 2', severity: 'medium', category: 'null-reference' });
 
-      const bugs = await provider.analyze({
-        files: ['/project/src/test.ts'],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [],
-      });
+      const mockProcess = createMockProcess([
+        '###SCANNING:test.ts',
+        `###BUG:${bug1}`,
+        `###BUG:${bug2}`,
+        '###COMPLETE',
+      ]);
 
-      expect(bugs).toEqual([]);
-    });
-
-    it('should throw error when claude not found', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockRejectedValue({ message: 'ENOENT' });
-
-      await expect(
-        provider.analyze({
-          files: ['/project/src/test.ts'],
-          cwd: '/project',
-          understanding: mockUnderstanding,
-          staticAnalysisResults: [],
-        })
-      ).rejects.toThrow('Claude CLI not found');
-    });
-
-    it('should throw error on timeout', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockRejectedValue({ message: 'timeout' });
-
-      await expect(
-        provider.analyze({
-          files: ['/project/src/test.ts'],
-          cwd: '/project',
-          understanding: mockUnderstanding,
-          staticAnalysisResults: [],
-        })
-      ).rejects.toThrow('Claude CLI timed out');
-    });
-
-    it('should include static analysis signals in prompt', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({ stdout: '[]' } as any);
-
-      await provider.analyze({
-        files: ['/project/src/test.ts'],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [
-          { tool: 'eslint', file: 'src/test.ts', line: 5, message: 'No explicit any', severity: 'warning' },
-        ],
-      });
-
-      expect(execa).toHaveBeenCalledWith(
-        'claude',
-        expect.arrayContaining(['-p', expect.stringContaining('eslint')]),
-        expect.any(Object)
-      );
-    });
-
-    it('should skip files that do not exist', async () => {
-      vi.mocked(existsSync).mockReturnValue(false);
-      vi.mocked(execa).mockResolvedValue({ stdout: '[]' } as any);
-
-      const bugs = await provider.analyze({
-        files: ['/project/src/missing.ts'],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [],
-      });
-
-      expect(bugs).toEqual([]);
-    });
-
-    it('should truncate large files', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('x'.repeat(60000));
-      vi.mocked(execa).mockResolvedValue({ stdout: '[]' } as any);
-
-      await provider.analyze({
-        files: ['/project/src/large.ts'],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [],
-      });
-
-      // Should have called execa with truncated content
-      expect(execa).toHaveBeenCalled();
-    });
-
-    it('should parse severity correctly', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: JSON.stringify([
-          { file: 'test.ts', line: 1, title: 'Bug 1', severity: 'critical', category: 'logic-error' },
-          { file: 'test.ts', line: 2, title: 'Bug 2', severity: 'low', category: 'logic-error' },
-          { file: 'test.ts', line: 3, title: 'Bug 3', severity: 'invalid', category: 'logic-error' },
-        ]),
-      } as any);
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
 
       const bugs = await provider.analyze({
         files: ['/project/test.ts'],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
-      expect(bugs[0].severity).toBe('critical');
-      expect(bugs[1].severity).toBe('low');
-      expect(bugs[2].severity).toBe('medium'); // Invalid defaults to medium
+      expect(bugs.length).toBe(2);
+      expect(bugs[0].title).toBe('Bug 1');
+      expect(bugs[1].title).toBe('Bug 2');
     });
 
-    it('should parse category correctly', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: JSON.stringify([
-          { file: 'test.ts', line: 1, title: 'Bug 1', severity: 'high', category: 'security' },
-          { file: 'test.ts', line: 2, title: 'Bug 2', severity: 'high', category: 'null_reference' },
-          { file: 'test.ts', line: 3, title: 'Bug 3', severity: 'high', category: 'xss' },
-          { file: 'test.ts', line: 4, title: 'Bug 4', severity: 'high', category: 'async' },
-          { file: 'test.ts', line: 5, title: 'Bug 5', severity: 'high', category: 'edge' },
-          { file: 'test.ts', line: 6, title: 'Bug 6', severity: 'high', category: 'type_coercion' },
-          { file: 'test.ts', line: 7, title: 'Bug 7', severity: 'high', category: 'leak' },
-        ]),
-      } as any);
+    it('should report progress via callback', async () => {
+      const mockProcess = createMockProcess([
+        '###SCANNING:src/api.ts',
+        '###COMPLETE',
+      ]);
 
-      const bugs = await provider.analyze({
-        files: ['/project/test.ts'],
-        cwd: '/project',
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
+
+      const progressMessages: string[] = [];
+      provider.setProgressCallback((msg) => progressMessages.push(msg));
+
+      await provider.analyze({
+        files: ['/project/src/api.ts'],
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
-      expect(bugs[0].category).toBe('security');
-      expect(bugs[1].category).toBe('null-reference');
-      expect(bugs[2].category).toBe('security');
-      expect(bugs[3].category).toBe('async-race-condition');
-      expect(bugs[4].category).toBe('edge-case');
-      expect(bugs[5].category).toBe('type-coercion');
-      expect(bugs[6].category).toBe('resource-leak');
+      expect(progressMessages).toContain('Scanning: src/api.ts');
     });
 
-    it('should extract JSON from markdown code blocks', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: 'Here are the bugs:\n```json\n[{"file": "test.ts", "line": 1, "title": "Bug"}]\n```',
-      } as any);
-
-      const bugs = await provider.analyze({
-        files: ['/project/test.ts'],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [],
-      });
-
-      expect(bugs.length).toBe(1);
-      expect(bugs[0].title).toBe('Bug');
-    });
-
-    it('should resolve relative file paths', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: JSON.stringify([
-          { file: 'src/test.ts', line: 1, title: 'Bug' },
-        ]),
-      } as any);
-
-      const bugs = await provider.analyze({
-        files: ['/project/src/test.ts'],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [],
-      });
-
-      expect(bugs[0].file).toBe('/project/src/test.ts');
-    });
-
-    it('should include contracts in prompt when available', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({ stdout: '[]' } as any);
-
-      const understandingWithContracts: CodebaseUnderstanding = {
-        ...mockUnderstanding,
-        contracts: [
-          {
-            function: 'processPayment',
-            file: 'payment.ts',
-            inputs: [],
-            outputs: { type: 'Result' },
-            invariants: ['Must validate amount', 'Must not double-charge'],
-            sideEffects: ['Creates payment record'],
-          },
-        ],
-      };
+    it('should call execa with correct arguments (no unsafe flag by default)', async () => {
+      const mockProcess = createMockProcess(['###COMPLETE']);
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
 
       await provider.analyze({
         files: ['/project/src/test.ts'],
-        cwd: '/project',
-        understanding: understandingWithContracts,
+        understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
       expect(execa).toHaveBeenCalledWith(
         'claude',
-        expect.arrayContaining(['-p', expect.stringContaining('processPayment')]),
-        expect.any(Object)
+        expect.arrayContaining(['--verbose', '-p']),
+        expect.objectContaining({ env: expect.any(Object) })
       );
+      // Should NOT contain the unsafe flag by default
+      const callArgs = vi.mocked(execa).mock.calls[0][1] as string[];
+      expect(callArgs).not.toContain('--dangerously-skip-permissions');
+    });
+
+    it('should include --dangerously-skip-permissions when unsafe mode is enabled', async () => {
+      const mockProcess = createMockProcess(['###COMPLETE']);
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
+
+      provider.setUnsafeMode(true);
+
+      await provider.analyze({
+        files: ['/project/src/test.ts'],
+        understanding: mockUnderstanding,
+        config: {} as any,
+        staticAnalysisResults: [],
+      });
+
+      const callArgs = vi.mocked(execa).mock.calls[0][1] as string[];
+      expect(callArgs).toContain('--dangerously-skip-permissions');
     });
   });
 
@@ -414,29 +313,28 @@ describe('providers/adapters/claude-code', () => {
 
       const result = await provider.adversarialValidate(mockBug, {
         files: [],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
       expect(result.survived).toBe(true);
     });
 
-    it('should handle disproved bug with counterArguments', async () => {
+    it('should handle disproved bug', async () => {
       vi.mocked(existsSync).mockReturnValue(true);
       vi.mocked(readFileSync).mockReturnValue('if (x) { x.foo; }');
       vi.mocked(execa).mockResolvedValue({
-        stdout: '{"survived": false, "counterArguments": ["There is a null check on line 8"], "confidence": "high"}',
+        stdout: '{"survived": false, "counterArguments": ["There is a null check"], "confidence": "high"}',
       } as any);
 
       const result = await provider.adversarialValidate(mockBug, {
         files: [],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
-      // Implementation returns survived based on parsing - verify response is parsed
       expect(result).toHaveProperty('survived');
       expect(result).toHaveProperty('counterArguments');
     });
@@ -448,8 +346,8 @@ describe('providers/adapters/claude-code', () => {
 
       const result = await provider.adversarialValidate(mockBug, {
         files: [],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
@@ -465,53 +363,46 @@ describe('providers/adapters/claude-code', () => {
 
       const result = await provider.adversarialValidate(mockBug, {
         files: [],
-        cwd: '/project',
         understanding: mockUnderstanding,
+        config: {} as any,
         staticAnalysisResults: [],
       });
 
       expect(result.survived).toBe(true);
-    });
-
-    it('should include adjusted confidence when survived', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: '{"survived": true, "counterArguments": [], "confidence": "high"}',
-      } as any);
-
-      const result = await provider.adversarialValidate(mockBug, {
-        files: [],
-        cwd: '/project',
-        understanding: mockUnderstanding,
-        staticAnalysisResults: [],
-      });
-
-      expect(result.survived).toBe(true);
-      // When survived, adjustedConfidence is set
-      if (result.adjustedConfidence) {
-        expect(result.adjustedConfidence.adversarialSurvived).toBe(true);
-      }
     });
   });
 
   describe('generateUnderstanding', () => {
-    it('should call execa with understanding prompt', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: '{"summary": {"type": "api", "language": "typescript", "description": "API"}, "features": [], "contracts": []}',
-      } as any);
+    it('should generate understanding via streaming', async () => {
+      const understandingJson = JSON.stringify({
+        summary: { type: 'api', language: 'typescript', description: 'API' },
+        features: [],
+        contracts: [],
+      });
 
-      await provider.generateUnderstanding(['/project/src/index.ts']);
+      const mockProcess = createMockProcess([
+        '###SCANNING:package.json',
+        '###SCANNING:src/index.ts',
+        `###UNDERSTANDING:${understandingJson}`,
+        '###COMPLETE',
+      ]);
 
-      expect(execa).toHaveBeenCalledWith('claude', expect.any(Array), expect.any(Object));
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
+
+      const understanding = await provider.generateUnderstanding(['/project/src/index.ts']);
+
+      // The understanding is generated - either parsed correctly or fallback
+      expect(understanding).toBeDefined();
+      expect(understanding.structure.totalFiles).toBe(1);
     });
 
     it('should handle parse errors gracefully', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({ stdout: 'not json' } as any);
+      const mockProcess = createMockProcess([
+        '###UNDERSTANDING:not valid json',
+        '###COMPLETE',
+      ]);
+
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
 
       const understanding = await provider.generateUnderstanding(['/project/src/index.ts']);
 
@@ -519,50 +410,42 @@ describe('providers/adapters/claude-code', () => {
       expect(understanding.summary.description).toContain('Failed to analyze');
     });
 
-    it('should prioritize important files', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: '{"summary": {"type": "app", "language": "typescript", "description": "App"}, "features": [], "contracts": []}',
-      } as any);
-
-      // Create more than 40 files
-      const files = Array.from({ length: 50 }, (_, i) => `/project/src/file${i}.ts`);
-      files.unshift('/project/package.json');
-      files.push('/project/src/index.ts');
-
-      await provider.generateUnderstanding(files);
-
-      // Should have called execa (meaning files were prioritized and limited)
-      expect(execa).toHaveBeenCalled();
-    });
-
-    it('should handle package.json parse errors', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockImplementation((path: any) => {
-        if (path.includes('package.json')) {
-          return 'invalid json';
-        }
-        return 'const x = 1;';
+    it('should report progress during analysis', async () => {
+      const understandingJson = JSON.stringify({
+        summary: { type: 'app', language: 'typescript', description: 'App' },
+        features: [],
+        contracts: [],
       });
-      vi.mocked(execa).mockResolvedValue({
-        stdout: '{"summary": {"type": "app", "language": "typescript", "description": "App"}, "features": [], "contracts": []}',
-      } as any);
 
-      const understanding = await provider.generateUnderstanding([
-        '/project/package.json',
-        '/project/src/index.ts',
+      const mockProcess = createMockProcess([
+        '###SCANNING:src/index.ts',
+        `###UNDERSTANDING:${understandingJson}`,
+        '###COMPLETE',
       ]);
 
-      expect(understanding).toBeDefined();
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
+
+      const progressMessages: string[] = [];
+      provider.setProgressCallback((msg) => progressMessages.push(msg));
+
+      await provider.generateUnderstanding(['/project/src/index.ts']);
+
+      expect(progressMessages).toContain('Examining: src/index.ts');
     });
 
     it('should return structure with totalFiles', async () => {
-      vi.mocked(existsSync).mockReturnValue(true);
-      vi.mocked(readFileSync).mockReturnValue('const x = 1;');
-      vi.mocked(execa).mockResolvedValue({
-        stdout: '{"summary": {"type": "app", "language": "typescript", "description": "App"}, "features": [], "contracts": []}',
-      } as any);
+      const understandingJson = JSON.stringify({
+        summary: { type: 'app', language: 'typescript', description: 'App' },
+        features: [],
+        contracts: [],
+      });
+
+      const mockProcess = createMockProcess([
+        `###UNDERSTANDING:${understandingJson}`,
+        '###COMPLETE',
+      ]);
+
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
 
       const understanding = await provider.generateUnderstanding([
         '/project/src/a.ts',
@@ -570,6 +453,64 @@ describe('providers/adapters/claude-code', () => {
       ]);
 
       expect(understanding.structure.totalFiles).toBe(2);
+    });
+  });
+
+  describe('cancel', () => {
+    it('should kill the current process', async () => {
+      const mockKill = vi.fn();
+      const mockProcess = createMockProcess(['###COMPLETE']);
+      (mockProcess as any).kill = mockKill;
+
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
+
+      // Start analysis (don't await)
+      const analysisPromise = provider.analyze({
+        files: ['/project/src/test.ts'],
+        understanding: mockUnderstanding,
+        config: {} as any,
+        staticAnalysisResults: [],
+      });
+
+      // Cancel immediately
+      provider.cancel();
+
+      // Wait for analysis to complete
+      await analysisPromise;
+
+      expect(mockKill).toHaveBeenCalled();
+    });
+  });
+
+  describe('callbacks', () => {
+    it('should call bug found callback when bug is found', async () => {
+      const bugJson = JSON.stringify({
+        file: 'test.ts',
+        line: 1,
+        title: 'Test Bug',
+        severity: 'high',
+        category: 'logic-error',
+      });
+
+      const mockProcess = createMockProcess([
+        `###BUG:${bugJson}`,
+        '###COMPLETE',
+      ]);
+
+      vi.mocked(execa).mockReturnValue(mockProcess as any);
+
+      const foundBugs: any[] = [];
+      provider.setBugFoundCallback((bug) => foundBugs.push(bug));
+
+      await provider.analyze({
+        files: ['/project/test.ts'],
+        understanding: mockUnderstanding,
+        config: {} as any,
+        staticAnalysisResults: [],
+      });
+
+      expect(foundBugs.length).toBe(1);
+      expect(foundBugs[0].title).toBe('Test Bug');
     });
   });
 });

@@ -1,5 +1,8 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
+import * as p from '@clack/prompts';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { initCommand } from './commands/init.js';
 import { scanCommand } from './commands/scan.js';
 import { fixCommand } from './commands/fix.js';
@@ -41,6 +44,7 @@ program
   .option('-p, --provider <provider>', 'LLM provider to use', 'claude-code')
   .option('--skip-questions', 'Skip interactive questions, use defaults')
   .option('--force', 'Overwrite existing .whiterose directory')
+  .option('--unsafe', 'Bypass LLM permission prompts (use with caution)')
   .action(initCommand);
 
 // ─────────────────────────────────────────────────────────────
@@ -56,6 +60,7 @@ program
   .option('-c, --category <categories...>', 'Filter by bug categories')
   .option('--min-confidence <level>', 'Minimum confidence level to report', 'low')
   .option('--no-adversarial', 'Skip adversarial validation (faster, less accurate)')
+  .option('--unsafe', 'Bypass LLM permission prompts (use with caution)')
   .action(scanCommand);
 
 // ─────────────────────────────────────────────────────────────
@@ -66,6 +71,9 @@ program
   .description('Fix bugs interactively or by ID')
   .option('--dry-run', 'Show proposed fixes without applying')
   .option('--branch <name>', 'Create fixes in a new branch')
+  .option('--sarif <path>', 'Load bugs from an external SARIF file')
+  .option('--github <url>', 'Load bug from a GitHub issue URL')
+  .option('--describe', 'Manually describe a bug to fix')
   .action(fixCommand);
 
 // ─────────────────────────────────────────────────────────────
@@ -95,10 +103,102 @@ program
   .option('--format <format>', 'Output format (markdown, sarif, json)', 'markdown')
   .action(reportCommand);
 
-// Show banner when no command provided
-if (process.argv.length === 2) {
+// ─────────────────────────────────────────────────────────────
+// Interactive menu when no command provided
+// ─────────────────────────────────────────────────────────────
+async function showInteractiveMenu(): Promise<void> {
   console.log(BANNER);
-  program.help();
+
+  const cwd = process.cwd();
+  const whiterosePath = join(cwd, '.whiterose');
+  const isInitialized = existsSync(whiterosePath);
+
+  // Show project status
+  if (isInitialized) {
+    console.log(chalk.dim(`  Project: ${chalk.white(cwd.split('/').pop())}`));
+    console.log(chalk.dim(`  Status: ${chalk.green('initialized')}`));
+    console.log();
+  } else {
+    console.log(chalk.dim(`  Project: ${chalk.white(cwd.split('/').pop())}`));
+    console.log(chalk.dim(`  Status: ${chalk.yellow('not initialized')}`));
+    console.log();
+  }
+
+  // Build menu options based on state
+  const menuOptions: Array<{ value: string; label: string; hint?: string }> = [];
+
+  if (!isInitialized) {
+    menuOptions.push({
+      value: 'init',
+      label: 'Initialize',
+      hint: 'set up whiterose for this project',
+    });
+  } else {
+    menuOptions.push(
+      { value: 'scan', label: 'Scan', hint: 'find bugs in the codebase' },
+      { value: 'fix', label: 'Fix', hint: 'fix bugs interactively' },
+      { value: 'status', label: 'Status', hint: 'show current status' },
+      { value: 'report', label: 'Report', hint: 'generate bug report' },
+      { value: 'refresh', label: 'Refresh', hint: 'rebuild codebase understanding' }
+    );
+  }
+
+  menuOptions.push({ value: 'help', label: 'Help', hint: 'show all commands' });
+  menuOptions.push({ value: 'exit', label: 'Exit' });
+
+  const choice = await p.select({
+    message: 'What would you like to do?',
+    options: menuOptions,
+  });
+
+  if (p.isCancel(choice) || choice === 'exit') {
+    p.outro(chalk.dim('Goodbye.'));
+    process.exit(0);
+  }
+
+  // Execute chosen command
+  console.log(); // Add spacing
+
+  switch (choice) {
+    case 'init':
+      await initCommand({ provider: 'claude-code', skipQuestions: false, force: false, unsafe: false });
+      break;
+    case 'scan':
+      await scanCommand([], {
+        full: false,
+        json: false,
+        sarif: false,
+        provider: undefined,
+        category: undefined,
+        minConfidence: 'low',
+        adversarial: true,
+        unsafe: false,
+      });
+      break;
+    case 'fix':
+      await fixCommand(undefined, { dryRun: false });
+      break;
+    case 'status':
+      await statusCommand();
+      break;
+    case 'report':
+      await reportCommand({ output: 'BUGS.md', format: 'markdown' });
+      break;
+    case 'refresh':
+      await refreshCommand({ keepConfig: false });
+      break;
+    case 'help':
+      program.help();
+      break;
+  }
 }
 
-program.parse();
+// Show interactive menu when no command provided
+if (process.argv.length === 2) {
+  showInteractiveMenu().catch((error) => {
+    console.error(chalk.red('Error:'), error.message);
+    process.exit(1);
+  });
+} else {
+  program.parse();
+}

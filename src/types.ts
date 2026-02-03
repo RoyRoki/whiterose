@@ -70,6 +70,7 @@ export const ProviderType = z.enum([
   'codex',
   'opencode',
   'ollama',
+  'gemini',
 ]);
 export type ProviderType = z.infer<typeof ProviderType>;
 
@@ -234,7 +235,7 @@ export interface LLMProvider {
   isAvailable(): Promise<boolean>;
   analyze(context: AnalysisContext): Promise<Bug[]>;
   adversarialValidate(bug: Bug, context: AnalysisContext): Promise<AdversarialResult>;
-  generateUnderstanding(files: string[]): Promise<CodebaseUnderstanding>;
+  generateUnderstanding(files: string[], existingDocsSummary?: string): Promise<CodebaseUnderstanding>;
 }
 
 export interface AdversarialResult {

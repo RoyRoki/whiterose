@@ -14,6 +14,9 @@ const providers: Record<ProviderType, () => LLMProvider> = {
   ollama: () => {
     throw new Error('Ollama provider not yet implemented');
   },
+  gemini: () => {
+    throw new Error('Gemini provider not yet implemented');
+  },
 };
 
 export async function getProvider(name: ProviderType): Promise<LLMProvider> {

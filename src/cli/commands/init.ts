@@ -3,16 +3,19 @@ import chalk from 'chalk';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { WhiteroseConfig, ProviderType, CodebaseUnderstanding } from '../../types.js';
-import { detectProvider } from '../../providers/detect.js';
+import { detectProvider, getProviderCommand } from '../../providers/detect.js';
 import { getProvider } from '../../providers/index.js';
+import { execa } from 'execa';
 import { scanCodebase } from '../../core/scanner/index.js';
 import { generateIntentDocument } from '../../core/contracts/intent.js';
+import { readExistingDocs, extractIntentFromDocs, buildDocsSummary } from '../../core/docs.js';
 import YAML from 'yaml';
 
 interface InitOptions {
   provider: string;
   skipQuestions: boolean;
   force: boolean;
+  unsafe: boolean;
 }
 
 export async function initCommand(options: InitOptions): Promise<void> {
@@ -46,20 +49,19 @@ export async function initCommand(options: InitOptions): Promise<void> {
 
   providerSpinner.stop(`Detected providers: ${availableProviders.join(', ')}`);
 
-  // Select provider
+  // Select provider - always ask user to confirm
   let selectedProvider: ProviderType;
   if (options.skipQuestions) {
-    selectedProvider = availableProviders[0] as ProviderType;
-  } else if (availableProviders.length === 1) {
+    // Only auto-select in skip mode
     selectedProvider = availableProviders[0] as ProviderType;
     p.log.info(`Using ${selectedProvider} as your LLM provider.`);
   } else {
     const providerChoice = await p.select({
-      message: 'Multiple providers detected. Which should whiterose use?',
-      options: availableProviders.map((p) => ({
-        value: p,
-        label: p,
-        hint: p === 'claude-code' ? 'recommended' : undefined,
+      message: 'Which LLM provider should whiterose use?',
+      options: availableProviders.map((prov) => ({
+        value: prov,
+        label: prov,
+        hint: prov === 'claude-code' ? 'recommended' : undefined,
       })),
     });
 
@@ -69,6 +71,29 @@ export async function initCommand(options: InitOptions): Promise<void> {
     }
 
     selectedProvider = providerChoice as ProviderType;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 1.5: Verify provider CLI actually works (fail fast)
+  // ─────────────────────────────────────────────────────────────
+  const verifySpinner = p.spinner();
+  verifySpinner.start('Verifying provider CLI works...');
+
+  try {
+    const command = getProviderCommand(selectedProvider);
+    await execa(command, ['--version'], { timeout: 10000 });
+    verifySpinner.stop(`Using ${selectedProvider} at: ${command}`);
+  } catch (error: any) {
+    verifySpinner.stop('Provider CLI verification failed');
+    const installHint = selectedProvider === 'claude-code'
+      ? 'npm install -g @anthropic-ai/claude-code'
+      : `Install ${selectedProvider} and ensure it's in your PATH`;
+    p.log.error(`Cannot run ${selectedProvider} CLI. ${installHint}`);
+    p.log.info(`Resolved path: ${getProviderCommand(selectedProvider)}`);
+    if (error.message) {
+      p.log.info(`Error: ${error.message}`);
+    }
+    process.exit(1);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -88,18 +113,67 @@ export async function initCommand(options: InitOptions): Promise<void> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Phase 3: Generate understanding via LLM
+  // Phase 2.5: Read existing documentation (Layer 0)
+  // ─────────────────────────────────────────────────────────────
+  const docsSpinner = p.spinner();
+  docsSpinner.start('Reading existing documentation...');
+
+  let docsSummary: string | undefined;
+  try {
+    const existingDocs = await readExistingDocs(cwd);
+    const extractedIntent = extractIntentFromDocs(existingDocs);
+    docsSummary = buildDocsSummary(existingDocs, extractedIntent);
+
+    const docsFound = [];
+    if (existingDocs.readme) docsFound.push('README');
+    if (existingDocs.contributing) docsFound.push('CONTRIBUTING');
+    if (existingDocs.packageJson) docsFound.push('package.json');
+    if (existingDocs.envExample) docsFound.push('.env.example');
+    if (existingDocs.apiDocs.length > 0) docsFound.push(`${existingDocs.apiDocs.length} API docs`);
+
+    if (docsFound.length > 0) {
+      docsSpinner.stop(`Found existing docs: ${docsFound.join(', ')}`);
+    } else {
+      docsSpinner.stop('No existing documentation found (will generate from code)');
+      docsSummary = undefined;
+    }
+  } catch (error) {
+    docsSpinner.stop('Could not read existing docs (continuing without)');
+    docsSummary = undefined;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Phase 3: Generate understanding via LLM (merge with existing docs)
   // ─────────────────────────────────────────────────────────────
   const understandingSpinner = p.spinner();
-  understandingSpinner.start('Analyzing codebase with AI...');
+  const startTime = Date.now();
+
+  understandingSpinner.start('Starting codebase analysis...');
 
   let understanding: CodebaseUnderstanding;
   try {
     const provider = await getProvider(selectedProvider);
-    understanding = await provider.generateUnderstanding(codebaseFiles);
-    understandingSpinner.stop('Codebase analysis complete');
+
+    // Enable unsafe mode if requested (bypasses LLM permission prompts)
+    if (options.unsafe && 'setUnsafeMode' in provider) {
+      (provider as any).setUnsafeMode(true);
+      p.log.warn('Running in unsafe mode (--unsafe). LLM permission prompts are bypassed.');
+    }
+
+    // Set up progress callback to update spinner
+    if ('setProgressCallback' in provider) {
+      (provider as any).setProgressCallback((message: string) => {
+        understandingSpinner.message(message);
+      });
+    }
+
+    // Pass existing docs summary to merge with AI exploration
+    understanding = await provider.generateUnderstanding(codebaseFiles, docsSummary);
+
+    const totalTime = Math.floor((Date.now() - startTime) / 1000);
+    understandingSpinner.stop(`Analysis complete (${totalTime}s)`);
   } catch (error) {
-    understandingSpinner.stop('Failed to analyze codebase');
+    understandingSpinner.stop('Analysis failed');
     p.log.error(String(error));
     process.exit(1);
   }

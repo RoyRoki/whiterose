@@ -147,10 +147,20 @@ describe('providers/detect', () => {
       expect(result).toBe(false);
     });
 
-    it('should return false for ollama (not in providerChecks)', async () => {
+    it('should return true for ollama when available', async () => {
+      vi.mocked(execa).mockResolvedValue({ stdout: 'ollama version 0.1.0' } as any);
+
       const result = await isProviderAvailable('ollama');
 
-      expect(result).toBe(false);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for gemini when available', async () => {
+      vi.mocked(execa).mockResolvedValue({ stdout: '1.0.0' } as any);
+
+      const result = await isProviderAvailable('gemini');
+
+      expect(result).toBe(true);
     });
   });
 });

@@ -20,6 +20,7 @@ interface ScanOptions {
   category?: string[];
   minConfidence: string;
   adversarial: boolean;
+  unsafe: boolean;
 }
 
 export async function scanCommand(paths: string[], options: ScanOptions): Promise<void> {
@@ -117,10 +118,30 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   const providerName = options.provider || config.provider;
   const provider = await getProvider(providerName as any);
 
+  // Enable unsafe mode if requested (bypasses LLM permission prompts)
+  if (options.unsafe) {
+    if ('setUnsafeMode' in provider) {
+      (provider as any).setUnsafeMode(true);
+      if (!isQuiet) {
+        p.log.warn('Running in unsafe mode (--unsafe). LLM permission prompts are bypassed.');
+      }
+    }
+  }
+
   let bugs: Bug[];
   if (!isQuiet) {
     const llmSpinner = p.spinner();
-    llmSpinner.start(`Analyzing with ${providerName}...`);
+    const analysisStartTime = Date.now();
+    llmSpinner.start(`Analyzing with ${providerName}... (this may take 1-2 minutes)`);
+
+    // Update spinner with elapsed time every 5 seconds
+    const analysisTimeInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - analysisStartTime) / 1000);
+      const minutes = Math.floor(elapsed / 60);
+      const seconds = elapsed % 60;
+      const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+      llmSpinner.message(`Analyzing with ${providerName}... (${timeStr} elapsed)`);
+    }, 5000);
 
     try {
       bugs = await provider.analyze({
@@ -129,8 +150,11 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
         config,
         staticAnalysisResults: staticResults,
       });
-      llmSpinner.stop(`Found ${bugs.length} potential bugs`);
+      clearInterval(analysisTimeInterval);
+      const totalTime = Math.floor((Date.now() - analysisStartTime) / 1000);
+      llmSpinner.stop(`Found ${bugs.length} potential bugs (${totalTime}s)`);
     } catch (error) {
+      clearInterval(analysisTimeInterval);
       llmSpinner.stop('Analysis failed');
       p.log.error(String(error));
       process.exit(1);

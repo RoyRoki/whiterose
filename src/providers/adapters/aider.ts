@@ -14,7 +14,7 @@ import {
   ConfidenceLevel,
   CodePathStep,
 } from '../../types.js';
-import { isProviderAvailable } from '../detect.js';
+import { isProviderAvailable, getProviderCommand } from '../detect.js';
 import { generateBugId } from '../../core/utils.js';
 
 const MAX_FILE_SIZE = 50000;
@@ -72,7 +72,7 @@ export class AiderProvider implements LLMProvider {
     return this.parseAdversarialResponse(result, bug);
   }
 
-  async generateUnderstanding(files: string[]): Promise<CodebaseUnderstanding> {
+  async generateUnderstanding(files: string[], _existingDocsSummary?: string): Promise<CodebaseUnderstanding> {
     const sampledFiles = this.prioritizeFiles(files, 40);
     const fileContents = this.readFilesWithLimit(sampledFiles, MAX_TOTAL_CONTEXT);
 
@@ -270,7 +270,8 @@ Output JSON ONLY describing:
         }
       }
 
-      const { stdout, stderr } = await execa('aider', args, {
+      const aiderCommand = getProviderCommand('aider');
+      const { stdout, stderr } = await execa(aiderCommand, args, {
         cwd,
         timeout: AIDER_TIMEOUT,
         env: {

@@ -1,6 +1,5 @@
-import { execa } from 'execa';
+import { execa, type ResultPromise } from 'execa';
 import { readFileSync, existsSync } from 'fs';
-import { dirname } from 'path';
 import {
   LLMProvider,
   ProviderType,
@@ -11,17 +10,30 @@ import {
   BugSeverity,
   BugCategory,
   ConfidenceLevel,
-  CodePathStep,
 } from '../../types.js';
-import { isProviderAvailable } from '../detect.js';
+import { isProviderAvailable, getProviderCommand } from '../detect.js';
 import { generateBugId } from '../../core/utils.js';
 
-const MAX_FILE_SIZE = 50000; // 50KB max per file
-const MAX_TOTAL_CONTEXT = 200000; // 200KB total context
-const ANALYSIS_TIMEOUT = 300000; // 5 minutes
+// Callback for streaming progress updates
+type ProgressCallback = (message: string) => void;
+type BugFoundCallback = (bug: Bug) => void;
+
+// Protocol markers for parsing agent output
+const MARKERS = {
+  SCANNING: '###SCANNING:',
+  BUG: '###BUG:',
+  UNDERSTANDING: '###UNDERSTANDING:',
+  COMPLETE: '###COMPLETE',
+  ERROR: '###ERROR:',
+};
 
 export class ClaudeCodeProvider implements LLMProvider {
   name: ProviderType = 'claude-code';
+
+  private progressCallback?: ProgressCallback;
+  private bugFoundCallback?: BugFoundCallback;
+  private currentProcess?: ResultPromise;
+  private unsafeMode = false;
 
   async detect(): Promise<boolean> {
     return isProviderAvailable('claude-code');
@@ -31,27 +43,90 @@ export class ClaudeCodeProvider implements LLMProvider {
     return isProviderAvailable('claude-code');
   }
 
+  /**
+   * Enable unsafe mode (--dangerously-skip-permissions).
+   * WARNING: This bypasses Claude's permission prompts and should only be used
+   * when you trust the codebase being analyzed.
+   */
+  setUnsafeMode(enabled: boolean): void {
+    this.unsafeMode = enabled;
+  }
+
+  isUnsafeMode(): boolean {
+    return this.unsafeMode;
+  }
+
+  setProgressCallback(callback: ProgressCallback): void {
+    this.progressCallback = callback;
+  }
+
+  setBugFoundCallback(callback: BugFoundCallback): void {
+    this.bugFoundCallback = callback;
+  }
+
+  private reportProgress(message: string): void {
+    if (this.progressCallback) {
+      this.progressCallback(message);
+    }
+  }
+
+  private reportBug(bug: Bug): void {
+    if (this.bugFoundCallback) {
+      this.bugFoundCallback(bug);
+    }
+  }
+
+  // Cancel any running analysis
+  cancel(): void {
+    if (this.currentProcess) {
+      this.currentProcess.kill();
+      this.currentProcess = undefined;
+    }
+  }
+
   async analyze(context: AnalysisContext): Promise<Bug[]> {
-    const { files, understanding, staticAnalysisResults } = context;
+    const { files, understanding } = context;
 
     if (files.length === 0) {
       return [];
     }
 
-    // Read file contents with size limits
-    const fileContents = this.readFilesWithLimit(files, MAX_TOTAL_CONTEXT);
+    const cwd = process.cwd();
+    const bugs: Bug[] = [];
+    let bugIndex = 0;
 
-    // Build the analysis prompt
-    const prompt = this.buildAnalysisPrompt(fileContents, understanding, staticAnalysisResults);
+    const prompt = this.buildAgenticAnalysisPrompt(understanding);
 
-    // Get the working directory (use first file's directory or cwd)
-    const cwd = files[0] ? dirname(files[0]) : process.cwd();
+    this.reportProgress('Starting agentic analysis...');
 
-    // Run claude with the prompt
-    const result = await this.runClaude(prompt, cwd);
+    try {
+      await this.runAgenticClaude(prompt, cwd, {
+        onScanning: (file) => {
+          this.reportProgress(`Scanning: ${file}`);
+        },
+        onBugFound: (bugData) => {
+          const bug = this.parseBugData(bugData, bugIndex++, files);
+          if (bug) {
+            bugs.push(bug);
+            this.reportBug(bug);
+            this.reportProgress(`Found: ${bug.title} (${bug.severity})`);
+          }
+        },
+        onComplete: () => {
+          this.reportProgress(`Analysis complete. Found ${bugs.length} bugs.`);
+        },
+        onError: (error) => {
+          this.reportProgress(`Error: ${error}`);
+        },
+      });
+    } catch (error: any) {
+      if (error.message?.includes('ENOENT')) {
+        throw new Error('Claude CLI not found. Install it with: npm install -g @anthropic-ai/claude-code');
+      }
+      throw error;
+    }
 
-    // Parse the response into bugs
-    return this.parseAnalysisResponse(result, files);
+    return bugs;
   }
 
   async adversarialValidate(bug: Bug, _context: AnalysisContext): Promise<AdversarialResult> {
@@ -60,7 +135,6 @@ export class ClaudeCodeProvider implements LLMProvider {
     try {
       if (existsSync(bug.file)) {
         fileContent = readFileSync(bug.file, 'utf-8');
-        // Get relevant lines around the bug
         const lines = fileContent.split('\n');
         const start = Math.max(0, bug.line - 20);
         const end = Math.min(lines.length, (bug.endLine || bug.line) + 20);
@@ -71,382 +145,272 @@ export class ClaudeCodeProvider implements LLMProvider {
     }
 
     const prompt = this.buildAdversarialPrompt(bug, fileContent);
-    const result = await this.runClaude(prompt, process.cwd());
+    const result = await this.runSimpleClaude(prompt, process.cwd());
 
     return this.parseAdversarialResponse(result, bug);
   }
 
-  async generateUnderstanding(files: string[]): Promise<CodebaseUnderstanding> {
-    // Prioritize and sample key files
-    const sampledFiles = this.prioritizeFiles(files, 40);
+  async generateUnderstanding(files: string[], existingDocsSummary?: string): Promise<CodebaseUnderstanding> {
+    const cwd = process.cwd();
 
-    // Read file contents
-    const fileContents = this.readFilesWithLimit(sampledFiles, MAX_TOTAL_CONTEXT);
+    this.reportProgress(`Starting codebase analysis (${files.length} files)...`);
 
-    // Also try to read package.json for dependencies
-    let packageJson: Record<string, unknown> | null = null;
-    const packageJsonPath = files.find((f) => f.endsWith('package.json'));
-    if (packageJsonPath) {
-      try {
-        packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-      } catch {
-        // Ignore parse errors
+    const prompt = this.buildAgenticUnderstandingPrompt(existingDocsSummary);
+    let understandingJson = '';
+
+    try {
+      await this.runAgenticClaude(prompt, cwd, {
+        onScanning: (file) => {
+          this.reportProgress(`Examining: ${file}`);
+        },
+        onUnderstanding: (json) => {
+          understandingJson = json;
+        },
+        onComplete: () => {
+          this.reportProgress('Understanding complete.');
+        },
+        onError: (error) => {
+          this.reportProgress(`Error: ${error}`);
+        },
+      });
+
+      return this.parseUnderstandingResponse(understandingJson, files);
+    } catch (error: any) {
+      if (error.message?.includes('ENOENT')) {
+        throw new Error('Claude CLI not found. Install it with: npm install -g @anthropic-ai/claude-code');
       }
+      throw error;
     }
-
-    const prompt = this.buildUnderstandingPrompt(files.length, fileContents, packageJson);
-    const result = await this.runClaude(prompt, process.cwd());
-
-    return this.parseUnderstandingResponse(result, files);
   }
 
   // ─────────────────────────────────────────────────────────────
-  // File Reading Helpers
+  // Agentic Prompts
   // ─────────────────────────────────────────────────────────────
 
-  private readFilesWithLimit(
-    files: string[],
-    maxTotal: number
-  ): Array<{ path: string; content: string }> {
-    const result: Array<{ path: string; content: string }> = [];
-    let totalSize = 0;
-
-    for (const file of files) {
-      if (totalSize >= maxTotal) break;
-
-      try {
-        if (!existsSync(file)) continue;
-
-        let content = readFileSync(file, 'utf-8');
-
-        // Truncate large files
-        if (content.length > MAX_FILE_SIZE) {
-          content = content.slice(0, MAX_FILE_SIZE) + '\n// ... truncated ...';
-        }
-
-        // Check if adding this file exceeds limit
-        if (totalSize + content.length > maxTotal) {
-          // Add partial content
-          const remaining = maxTotal - totalSize;
-          content = content.slice(0, remaining) + '\n// ... truncated ...';
-        }
-
-        result.push({ path: file, content });
-        totalSize += content.length;
-      } catch {
-        // Skip files that can't be read
-      }
-    }
-
-    return result;
-  }
-
-  private prioritizeFiles(files: string[], count: number): string[] {
-    if (files.length <= count) return files;
-
-    // Priority patterns (higher = more important)
-    const priorityPatterns: Array<{ pattern: RegExp; priority: number }> = [
-      { pattern: /package\.json$/, priority: 100 },
-      { pattern: /tsconfig\.json$/, priority: 90 },
-      { pattern: /README\.md$/i, priority: 80 },
-      { pattern: /\/index\.(ts|js|tsx|jsx)$/, priority: 70 },
-      { pattern: /\/app\.(ts|js|tsx|jsx)$/, priority: 70 },
-      { pattern: /\/main\.(ts|js|tsx|jsx)$/, priority: 70 },
-      { pattern: /\/server\.(ts|js|tsx|jsx)$/, priority: 65 },
-      { pattern: /\/api\//, priority: 60 },
-      { pattern: /\/routes?\//, priority: 55 },
-      { pattern: /\/pages\//, priority: 55 },
-      { pattern: /\/components\//, priority: 50 },
-      { pattern: /\/hooks\//, priority: 45 },
-      { pattern: /\/utils?\//, priority: 40 },
-      { pattern: /\/lib\//, priority: 40 },
-      { pattern: /\/services?\//, priority: 50 },
-      { pattern: /\/models?\//, priority: 45 },
-      { pattern: /\/controllers?\//, priority: 50 },
-      { pattern: /\.(ts|tsx)$/, priority: 30 },
-      { pattern: /\.(js|jsx)$/, priority: 20 },
-    ];
-
-    // Score each file
-    const scored = files.map((file) => {
-      let score = 0;
-      for (const { pattern, priority } of priorityPatterns) {
-        if (pattern.test(file)) {
-          score = Math.max(score, priority);
-        }
-      }
-      return { file, score };
-    });
-
-    // Sort by score descending, then take top N
-    scored.sort((a, b) => b.score - a.score);
-
-    return scored.slice(0, count).map((s) => s.file);
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Prompt Builders
-  // ─────────────────────────────────────────────────────────────
-
-  private buildAnalysisPrompt(
-    fileContents: Array<{ path: string; content: string }>,
-    understanding: CodebaseUnderstanding,
-    staticResults: Array<{ tool: string; file: string; line: number; message: string }>
-  ): string {
-    const filesSection = fileContents
-      .map((f) => `=== ${f.path} ===\n${f.content}`)
-      .join('\n\n');
-
-    const staticSignals =
-      staticResults.length > 0
-        ? `\n\nStatic analysis signals (from tsc/eslint):\n${staticResults
-            .slice(0, 50)
-            .map((r) => `- ${r.file}:${r.line} [${r.tool}]: ${r.message}`)
-            .join('\n')}`
-        : '';
-
-    const contractsSection =
-      understanding.contracts.length > 0
-        ? `\n\nBehavioral contracts to validate:\n${understanding.contracts
-            .slice(0, 15)
-            .map((c) => `- ${c.function}(): ${c.invariants.slice(0, 3).join(', ')}`)
-            .join('\n')}`
-        : '';
-
-    return `You are whiterose, an expert bug hunter. Analyze the following code for bugs.
+  private buildAgenticAnalysisPrompt(understanding: CodebaseUnderstanding): string {
+    return `You are whiterose, an expert bug hunter. Your task is to explore this codebase and find real bugs.
 
 CODEBASE CONTEXT:
 - Type: ${understanding.summary.type}
 - Framework: ${understanding.summary.framework || 'Unknown'}
 - Description: ${understanding.summary.description}
-${contractsSection}
-${staticSignals}
 
-FILES TO ANALYZE:
-${filesSection}
+YOUR TASK:
+1. Explore the codebase by reading files
+2. Look for bugs in these categories:
+   - Logic errors (off-by-one, wrong operators, incorrect conditions)
+   - Null/undefined dereference
+   - Security vulnerabilities (injection, auth bypass, XSS)
+   - Async/race conditions (missing await, unhandled promises)
+   - Edge cases (empty arrays, zero values, boundaries)
+   - Resource leaks (unclosed connections)
 
-FIND BUGS IN THESE CATEGORIES:
-1. Logic errors (off-by-one, wrong operators, incorrect conditions, infinite loops)
-2. Null/undefined dereference (accessing properties on potentially null values)
-3. Security vulnerabilities (injection, auth bypass, data exposure, XSS, CSRF)
-4. Async/race conditions (missing await, unhandled promises, race conditions)
-5. Edge cases (empty arrays, zero values, boundary conditions)
-6. Resource leaks (unclosed connections, event listener leaks)
-7. Type coercion bugs (loose equality, implicit conversions)
+PROTOCOL - You MUST output these markers:
+- Before reading each file, output: ${MARKERS.SCANNING}<filepath>
+- When you find a bug, output: ${MARKERS.BUG}<json>
+- When completely done, output: ${MARKERS.COMPLETE}
+- If you encounter an error, output: ${MARKERS.ERROR}<message>
 
-FOR EACH BUG, PROVIDE:
-1. The exact file path and line number
-2. A brief title (max 60 chars)
-3. Detailed description of what's wrong
-4. Severity: critical (crash/security), high (data loss/corruption), medium (incorrect behavior), low (minor issue)
-5. Category from the list above
-6. Code path: Step-by-step trace showing how the bug triggers
-7. Evidence: Specific code references proving this is a bug
-8. Suggested fix: Code snippet showing the fix
+BUG JSON FORMAT:
+${MARKERS.BUG}{"file":"src/api/users.ts","line":42,"title":"Null dereference in getUserById","description":"...","severity":"high","category":"null-reference","evidence":["..."],"suggestedFix":"..."}
 
-BE PRECISE:
+IMPORTANT:
 - Only report bugs you have HIGH confidence in
 - Include exact line numbers
-- Show the actual code path that triggers the bug
-- Don't report style issues or minor refactoring suggestions
+- Focus on real bugs, not style issues
+- Explore systematically - check API routes, data handling, auth flows
 
-OUTPUT AS JSON (and nothing else):
-[
-  {
-    "file": "src/api/users.ts",
-    "line": 42,
-    "endLine": 45,
-    "title": "Null dereference in getUserById",
-    "description": "The function returns user.name without checking if user is null. When db.find() returns null for non-existent users, this will throw a TypeError.",
-    "severity": "high",
-    "category": "null-reference",
-    "codePath": [
-      {"step": 1, "file": "src/api/users.ts", "line": 38, "code": "const user = await db.find(id)", "explanation": "db.find returns null when user not found"},
-      {"step": 2, "file": "src/api/users.ts", "line": 42, "code": "return user.name", "explanation": "Dereference without null check causes TypeError"}
-    ],
-    "evidence": ["Line 42 accesses user.name without null check", "db.find() is documented to return null when not found"],
-    "suggestedFix": "if (!user) return null;\\nreturn user.name;"
+Now explore this codebase and find bugs. Start by reading the main entry points.`;
   }
-]
 
-If no bugs are found, return an empty array: []`;
+  private buildAgenticUnderstandingPrompt(existingDocsSummary?: string): string {
+    const docsSection = existingDocsSummary
+      ? `\n\nEXISTING DOCUMENTATION (merge this with your exploration):\n${existingDocsSummary}\n`
+      : '';
+
+    return `You are whiterose. Your task is to understand this codebase.
+${docsSection}
+YOUR TASK:
+1. Review the existing documentation above (if any)
+2. Explore the codebase structure to fill in gaps
+3. Read key files (main entry points, config files, core modules)
+4. Build a comprehensive understanding merging docs + code exploration
+5. Identify main features, business rules, and behavioral contracts
+
+PROTOCOL - You MUST output these markers:
+- Before reading each file, output: ${MARKERS.SCANNING}<filepath>
+- When you have full understanding, output: ${MARKERS.UNDERSTANDING}<json>
+- When completely done, output: ${MARKERS.COMPLETE}
+
+UNDERSTANDING JSON FORMAT:
+${MARKERS.UNDERSTANDING}{
+  "summary": {
+    "type": "api|web-app|cli|library|etc",
+    "framework": "next.js|express|react|etc",
+    "language": "typescript|javascript",
+    "description": "2-3 sentence description"
+  },
+  "features": [
+    {"name": "Feature", "description": "What it does", "priority": "critical|high|medium|low", "constraints": ["business rule 1", "invariant 2"], "relatedFiles": ["path/to/file.ts"]}
+  ],
+  "contracts": [
+    {"function": "functionName", "file": "path/to/file.ts", "inputs": [], "outputs": {}, "invariants": ["must do X before Y"], "sideEffects": [], "throws": []}
+  ]
+}
+
+IMPORTANT:
+- Merge existing documentation with what you discover in the code
+- Focus on business rules and invariants (what MUST be true)
+- Identify critical paths (checkout, auth, payments, etc.)
+- Document behavioral contracts for important functions
+
+Now explore this codebase and build understanding.`;
   }
 
   private buildAdversarialPrompt(bug: Bug, fileContent: string): string {
-    return `You are a skeptical code reviewer. Your job is to DISPROVE the following bug report.
+    return `You are a skeptical code reviewer. Try to DISPROVE this bug report.
 
 REPORTED BUG:
 - File: ${bug.file}:${bug.line}
 - Title: ${bug.title}
 - Description: ${bug.description}
 - Severity: ${bug.severity}
-- Category: ${bug.category}
-- Evidence: ${bug.evidence.join('; ')}
 
 CODE CONTEXT:
 ${fileContent}
 
-CODE PATH CLAIMED:
-${bug.codePath.map((s) => `${s.step}. ${s.file}:${s.line} - ${s.explanation}`).join('\n')}
-
-YOUR TASK:
 Try to prove this is NOT a bug by finding:
-1. Guards, checks, or validation that prevents this issue
-2. Type system guarantees (TypeScript types that make this impossible)
-3. Framework/library behavior that handles this case
-4. Unreachable code paths (conditions that can never be true)
-5. Invariants established earlier in the code
-6. Any other reason this isn't actually exploitable
+1. Guards or validation that prevents this
+2. Type system guarantees
+3. Framework behavior that handles this
+4. Unreachable code paths
 
-BE THOROUGH:
-- Check for try/catch blocks
-- Check for optional chaining (?.)
-- Check for nullish coalescing (??)
-- Check for type guards
-- Check for early returns
-- Check framework conventions
+OUTPUT AS JSON:
+{"survived": true/false, "counterArguments": ["reason 1"], "confidence": "high/medium/low", "explanation": "..."}
 
-OUTPUT AS JSON (and nothing else):
-{
-  "survived": true/false,
-  "counterArguments": ["reason 1", "reason 2"],
-  "confidence": "high/medium/low",
-  "explanation": "Brief explanation of why this is or isn't a real bug"
-}
-
-Set "survived": true if you CANNOT disprove the bug (it's real).
-Set "survived": false if you found valid reasons it's not a bug.`;
-  }
-
-  private buildUnderstandingPrompt(
-    totalFiles: number,
-    fileContents: Array<{ path: string; content: string }>,
-    packageJson: Record<string, unknown> | null
-  ): string {
-    const filesSection = fileContents
-      .map((f) => `=== ${f.path} ===\n${f.content}`)
-      .join('\n\n');
-
-    const depsSection = packageJson
-      ? `\nDEPENDENCIES (from package.json):\n${JSON.stringify(
-          {
-            dependencies: (packageJson as any).dependencies || {},
-            devDependencies: (packageJson as any).devDependencies || {},
-          },
-          null,
-          2
-        )}`
-      : '';
-
-    return `Analyze this codebase to understand its structure, purpose, and key behaviors.
-
-CODEBASE STATS:
-- Total files: ${totalFiles}
-- Sample files shown: ${fileContents.length}
-${depsSection}
-
-SAMPLE FILES:
-${filesSection}
-
-ANALYZE AND PROVIDE:
-
-1. SUMMARY: What is this application?
-   - type: What kind of app? (e-commerce, saas, api, cli, library, mobile-app, etc.)
-   - framework: Primary framework (next.js, express, fastify, react, vue, etc.)
-   - language: Primary language (typescript, javascript)
-   - description: 2-3 sentence description of what this app does
-
-2. FEATURES: List the main features/modules (max 10)
-   For each feature:
-   - name: Feature name
-   - description: What it does
-   - priority: critical/high/medium/low (based on business importance)
-   - constraints: Business rules that must be maintained (max 5)
-   - relatedFiles: Key files for this feature (max 5)
-
-3. BEHAVIORAL CONTRACTS: For important functions (max 15)
-   For each contract:
-   - function: Function name
-   - file: File path
-   - inputs: Array of {name, type, constraints?}
-   - outputs: {type, constraints?}
-   - invariants: Rules that must always be true (max 5)
-   - sideEffects: What this function changes (database, files, etc.)
-   - throws: Exceptions this can throw
-
-OUTPUT AS JSON (and nothing else):
-{
-  "summary": {
-    "type": "e-commerce",
-    "framework": "next.js",
-    "language": "typescript",
-    "description": "An online store for selling widgets with cart, checkout, and user accounts."
-  },
-  "features": [
-    {
-      "name": "Checkout",
-      "description": "Handles cart to order conversion and payment processing",
-      "priority": "critical",
-      "constraints": ["Must not double-charge", "Must validate inventory before purchase"],
-      "relatedFiles": ["src/api/checkout.ts", "src/services/payment.ts"]
-    }
-  ],
-  "contracts": [
-    {
-      "function": "processPayment",
-      "file": "src/services/payment.ts",
-      "inputs": [{"name": "orderId", "type": "string"}, {"name": "amount", "type": "number", "constraints": "positive integer, cents"}],
-      "outputs": {"type": "PaymentResult", "constraints": "success or specific error"},
-      "invariants": ["Must create order record before charging", "Must rollback on failure"],
-      "sideEffects": ["Creates payment record", "Updates order status"],
-      "throws": ["PaymentDeclinedError", "InsufficientFundsError"]
-    }
-  ]
-}`;
+Set "survived": true if you CANNOT disprove it (it's a real bug).`;
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Claude CLI Execution
+  // Claude CLI Execution (Agentic Mode)
   // ─────────────────────────────────────────────────────────────
 
-  private async runClaude(prompt: string, cwd: string): Promise<string> {
+  private async runAgenticClaude(
+    prompt: string,
+    cwd: string,
+    callbacks: {
+      onScanning?: (file: string) => void;
+      onBugFound?: (bugJson: string) => void;
+      onUnderstanding?: (json: string) => void;
+      onComplete?: () => void;
+      onError?: (error: string) => void;
+    }
+  ): Promise<void> {
+    const claudeCommand = getProviderCommand('claude-code');
+
+    // Build command arguments
+    const args = ['--verbose', '-p', prompt];
+
+    // Only add --dangerously-skip-permissions if explicitly enabled
+    // This flag bypasses Claude's safety prompts - use with caution
+    if (this.unsafeMode) {
+      args.unshift('--dangerously-skip-permissions');
+    }
+
+    this.currentProcess = execa(
+      claudeCommand,
+      args,
+      {
+        cwd,
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+        },
+        reject: false,
+      }
+    );
+
+    // Buffer for accumulating output
+    let buffer = '';
+
+    // Process streaming output
+    this.currentProcess.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+
+      // Process complete lines
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        this.processAgentOutput(line, callbacks);
+      }
+    });
+
+    this.currentProcess.stderr?.on('data', (chunk: Buffer) => {
+      // Log stderr for debugging but don't treat as error
+      const text = chunk.toString().trim();
+      if (text && !text.includes('Loading')) {
+        // Could log to debug
+      }
+    });
+
+    await this.currentProcess;
+
+    // Process any remaining buffer
+    if (buffer.trim()) {
+      this.processAgentOutput(buffer, callbacks);
+    }
+
+    this.currentProcess = undefined;
+  }
+
+  private processAgentOutput(
+    line: string,
+    callbacks: {
+      onScanning?: (file: string) => void;
+      onBugFound?: (bugJson: string) => void;
+      onUnderstanding?: (json: string) => void;
+      onComplete?: () => void;
+      onError?: (error: string) => void;
+    }
+  ): void {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith(MARKERS.SCANNING)) {
+      const file = trimmed.slice(MARKERS.SCANNING.length).trim();
+      callbacks.onScanning?.(file);
+    } else if (trimmed.startsWith(MARKERS.BUG)) {
+      const json = trimmed.slice(MARKERS.BUG.length).trim();
+      callbacks.onBugFound?.(json);
+    } else if (trimmed.startsWith(MARKERS.UNDERSTANDING)) {
+      const json = trimmed.slice(MARKERS.UNDERSTANDING.length).trim();
+      callbacks.onUnderstanding?.(json);
+    } else if (trimmed.startsWith(MARKERS.COMPLETE)) {
+      callbacks.onComplete?.();
+    } else if (trimmed.startsWith(MARKERS.ERROR)) {
+      const error = trimmed.slice(MARKERS.ERROR.length).trim();
+      callbacks.onError?.(error);
+    }
+  }
+
+  // Simple non-agentic mode for short prompts (adversarial validation)
+  private async runSimpleClaude(prompt: string, cwd: string): Promise<string> {
+    const claudeCommand = getProviderCommand('claude-code');
+
     try {
-      // Use claude CLI with print mode for non-interactive output
       const { stdout } = await execa(
-        'claude',
-        [
-          '-p', prompt,
-          '--output-format', 'text',
-          '--verbose',
-        ],
+        claudeCommand,
+        ['-p', prompt, '--output-format', 'text'],
         {
           cwd,
-          timeout: ANALYSIS_TIMEOUT,
-          env: {
-            ...process.env,
-            // Ensure we get clean output
-            NO_COLOR: '1',
-          },
+          timeout: 120000, // 2 min for simple prompts
+          env: { ...process.env, NO_COLOR: '1' },
         }
       );
-
       return stdout;
     } catch (error: any) {
-      // If claude exits with error but has stdout, use it
-      if (error.stdout && error.stdout.length > 0) {
-        return error.stdout;
-      }
-
-      // Check for common errors
-      if (error.message?.includes('ENOENT')) {
-        throw new Error('Claude CLI not found. Install it with: npm install -g @anthropic-ai/claude-code');
-      }
-
-      if (error.message?.includes('timeout')) {
-        throw new Error('Claude CLI timed out. Try scanning fewer files.');
-      }
-
-      throw new Error(`Claude CLI failed: ${error.message}`);
+      if (error.stdout) return error.stdout;
+      throw error;
     }
   }
 
@@ -454,84 +418,51 @@ OUTPUT AS JSON (and nothing else):
   // Response Parsers
   // ─────────────────────────────────────────────────────────────
 
-  private parseAnalysisResponse(response: string, files: string[]): Bug[] {
+  private parseBugData(json: string, index: number, files: string[]): Bug | null {
     try {
-      // Extract JSON from the response (handle markdown code blocks)
-      const json = this.extractJson(response);
-      if (!json) {
-        console.error('No JSON found in analysis response');
-        return [];
+      const data = JSON.parse(json);
+
+      if (!data.file || !data.line || !data.title) {
+        return null;
       }
 
-      const parsed = JSON.parse(json);
-      if (!Array.isArray(parsed)) {
-        console.error('Analysis response is not an array');
-        return [];
+      // Resolve file path
+      let filePath = data.file;
+      if (!filePath.startsWith('/')) {
+        const match = files.find(f => f.endsWith(filePath) || f.includes(filePath));
+        if (match) filePath = match;
       }
 
-      const bugs: Bug[] = [];
-
-      for (let i = 0; i < parsed.length; i++) {
-        const item = parsed[i];
-
-        // Validate required fields
-        if (!item.file || !item.line || !item.title) {
-          continue;
-        }
-
-        // Resolve relative paths
-        let filePath = item.file;
-        if (!filePath.startsWith('/')) {
-          // Try to find matching file from our list
-          const match = files.find(
-            (f) => f.endsWith(filePath) || f.includes(filePath)
-          );
-          if (match) {
-            filePath = match;
-          }
-        }
-
-        // Parse code path
-        const codePath: CodePathStep[] = (item.codePath || []).map(
-          (step: any, idx: number) => ({
-            step: step.step || idx + 1,
-            file: step.file || filePath,
-            line: step.line || item.line,
-            code: step.code || '',
-            explanation: step.explanation || '',
-          })
-        );
-
-        const bug: Bug = {
-          id: generateBugId(i),
-          title: String(item.title).slice(0, 100),
-          description: String(item.description || ''),
-          file: filePath,
-          line: Number(item.line) || 0,
-          endLine: item.endLine ? Number(item.endLine) : undefined,
-          severity: this.parseSeverity(item.severity),
-          category: this.parseCategory(item.category),
-          confidence: {
-            overall: 'medium' as ConfidenceLevel,
-            codePathValidity: 0.8,
-            reachability: 0.8,
-            intentViolation: false,
-            staticToolSignal: false,
-            adversarialSurvived: false,
-          },
-          codePath,
-          evidence: Array.isArray(item.evidence) ? item.evidence.map(String) : [],
-          suggestedFix: item.suggestedFix ? String(item.suggestedFix) : undefined,
-          createdAt: new Date().toISOString(),
-        };
-
-        bugs.push(bug);
-      }
-
-      return bugs;
-    } catch (error) {
-      console.error('Failed to parse analysis response:', error);
-      return [];
+      return {
+        id: generateBugId(index),
+        title: String(data.title).slice(0, 100),
+        description: String(data.description || ''),
+        file: filePath,
+        line: Number(data.line) || 0,
+        endLine: data.endLine ? Number(data.endLine) : undefined,
+        severity: this.parseSeverity(data.severity),
+        category: this.parseCategory(data.category),
+        confidence: {
+          overall: 'medium' as ConfidenceLevel,
+          codePathValidity: 0.8,
+          reachability: 0.8,
+          intentViolation: false,
+          staticToolSignal: false,
+          adversarialSurvived: false,
+        },
+        codePath: (data.codePath || []).map((step: any, idx: number) => ({
+          step: idx + 1,
+          file: step.file || filePath,
+          line: step.line || data.line,
+          code: step.code || '',
+          explanation: step.explanation || '',
+        })),
+        evidence: Array.isArray(data.evidence) ? data.evidence : [],
+        suggestedFix: data.suggestedFix,
+        createdAt: new Date().toISOString(),
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -539,14 +470,11 @@ OUTPUT AS JSON (and nothing else):
     try {
       const json = this.extractJson(response);
       if (!json) {
-        // If no JSON, assume bug survived (conservative)
         return { survived: true, counterArguments: [] };
       }
 
       const parsed = JSON.parse(json);
-
       const survived = parsed.survived !== false;
-      const confidence = this.parseConfidence(parsed.confidence);
 
       return {
         survived,
@@ -556,21 +484,17 @@ OUTPUT AS JSON (and nothing else):
         adjustedConfidence: survived
           ? {
               ...bug.confidence,
-              overall: confidence,
+              overall: this.parseConfidence(parsed.confidence),
               adversarialSurvived: true,
             }
           : undefined,
       };
     } catch {
-      // On parse error, assume bug survived (conservative)
       return { survived: true, counterArguments: [] };
     }
   }
 
-  private parseUnderstandingResponse(
-    response: string,
-    files: string[]
-  ): CodebaseUnderstanding {
+  private parseUnderstandingResponse(response: string, files: string[]): CodebaseUnderstanding {
     try {
       const json = this.extractJson(response);
       if (!json) {
@@ -579,9 +503,9 @@ OUTPUT AS JSON (and nothing else):
 
       const parsed = JSON.parse(json);
 
-      // Count total lines
+      // Count total lines from a sample
       let totalLines = 0;
-      for (const file of files.slice(0, 100)) {
+      for (const file of files.slice(0, 50)) {
         try {
           const content = readFileSync(file, 'utf-8');
           totalLines += content.split('\n').length;
@@ -622,8 +546,6 @@ OUTPUT AS JSON (and nothing else):
         },
       };
     } catch (error) {
-      console.error('Failed to parse understanding response:', error);
-
       // Return minimal understanding on failure
       return {
         version: '1',
@@ -645,23 +567,23 @@ OUTPUT AS JSON (and nothing else):
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Utility Methods
+  // Utilities
   // ─────────────────────────────────────────────────────────────
 
   private extractJson(text: string): string | null {
-    // Try to find JSON in markdown code blocks first
+    // Try markdown code blocks
     const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (codeBlockMatch) {
       return codeBlockMatch[1].trim();
     }
 
-    // Try to find raw JSON array
+    // Try raw JSON array
     const arrayMatch = text.match(/\[[\s\S]*\]/);
     if (arrayMatch) {
       return arrayMatch[0];
     }
 
-    // Try to find raw JSON object
+    // Try raw JSON object
     const objectMatch = text.match(/\{[\s\S]*\}/);
     if (objectMatch) {
       return objectMatch[0];
@@ -681,14 +603,8 @@ OUTPUT AS JSON (and nothing else):
   private parseCategory(value: unknown): BugCategory {
     const str = String(value).toLowerCase().replace(/_/g, '-');
     const validCategories: BugCategory[] = [
-      'logic-error',
-      'security',
-      'async-race-condition',
-      'edge-case',
-      'null-reference',
-      'type-coercion',
-      'resource-leak',
-      'intent-violation',
+      'logic-error', 'security', 'async-race-condition', 'edge-case',
+      'null-reference', 'type-coercion', 'resource-leak', 'intent-violation',
     ];
 
     if (validCategories.includes(str as BugCategory)) {
@@ -700,8 +616,6 @@ OUTPUT AS JSON (and nothing else):
     if (str.includes('security') || str.includes('injection') || str.includes('xss')) return 'security';
     if (str.includes('async') || str.includes('race') || str.includes('promise')) return 'async-race-condition';
     if (str.includes('edge') || str.includes('boundary')) return 'edge-case';
-    if (str.includes('type') || str.includes('coercion')) return 'type-coercion';
-    if (str.includes('leak') || str.includes('resource')) return 'resource-leak';
 
     return 'logic-error';
   }
