@@ -2,13 +2,15 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import * as p from '@clack/prompts';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, resolve, basename } from 'path';
 import { initCommand } from './commands/init.js';
 import { scanCommand } from './commands/scan.js';
 import { fixCommand } from './commands/fix.js';
 import { refreshCommand } from './commands/refresh.js';
 import { statusCommand } from './commands/status.js';
 import { reportCommand } from './commands/report.js';
+import { detectProvider } from '../providers/detect.js';
+import { ProviderType } from '../types.js';
 
 const BANNER = `
 ${chalk.red('██╗    ██╗██╗  ██╗██╗████████╗███████╗██████╗  ██████╗ ███████╗███████╗')}
@@ -26,7 +28,7 @@ const program = new Command();
 program
   .name('whiterose')
   .description('AI-powered bug hunter that uses your existing LLM subscription')
-  .version('0.1.0')
+  .version('0.2.0')
   .hook('preAction', () => {
     // Show banner only for main commands, not help
     const args = process.argv.slice(2);
@@ -104,98 +106,164 @@ program
   .action(reportCommand);
 
 // ─────────────────────────────────────────────────────────────
-// Interactive menu when no command provided
+// Interactive wizard when no command provided
 // ─────────────────────────────────────────────────────────────
-async function showInteractiveMenu(): Promise<void> {
+async function showInteractiveWizard(): Promise<void> {
   console.log(BANNER);
 
+  p.intro(chalk.red('whiterose') + chalk.dim(' - AI Bug Hunter'));
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 1: Repository path
+  // ─────────────────────────────────────────────────────────────
   const cwd = process.cwd();
-  const whiterosePath = join(cwd, '.whiterose');
-  const isInitialized = existsSync(whiterosePath);
+  const defaultPath = cwd;
 
-  // Show project status
-  if (isInitialized) {
-    console.log(chalk.dim(`  Project: ${chalk.white(cwd.split('/').pop())}`));
-    console.log(chalk.dim(`  Status: ${chalk.green('initialized')}`));
-    console.log();
-  } else {
-    console.log(chalk.dim(`  Project: ${chalk.white(cwd.split('/').pop())}`));
-    console.log(chalk.dim(`  Status: ${chalk.yellow('not initialized')}`));
-    console.log();
-  }
-
-  // Build menu options based on state
-  const menuOptions: Array<{ value: string; label: string; hint?: string }> = [];
-
-  if (!isInitialized) {
-    menuOptions.push({
-      value: 'init',
-      label: 'Initialize',
-      hint: 'set up whiterose for this project',
-    });
-  } else {
-    menuOptions.push(
-      { value: 'scan', label: 'Scan', hint: 'find bugs in the codebase' },
-      { value: 'fix', label: 'Fix', hint: 'fix bugs interactively' },
-      { value: 'status', label: 'Status', hint: 'show current status' },
-      { value: 'report', label: 'Report', hint: 'generate bug report' },
-      { value: 'refresh', label: 'Refresh', hint: 'rebuild codebase understanding' }
-    );
-  }
-
-  menuOptions.push({ value: 'help', label: 'Help', hint: 'show all commands' });
-  menuOptions.push({ value: 'exit', label: 'Exit' });
-
-  const choice = await p.select({
-    message: 'What would you like to do?',
-    options: menuOptions,
+  const repoPath = await p.text({
+    message: 'Repository path',
+    placeholder: defaultPath,
+    initialValue: defaultPath,
+    validate: (value) => {
+      const path = value || defaultPath;
+      if (!existsSync(path)) {
+        return 'Directory does not exist';
+      }
+      return undefined;
+    },
   });
 
-  if (p.isCancel(choice) || choice === 'exit') {
-    p.outro(chalk.dim('Goodbye.'));
+  if (p.isCancel(repoPath)) {
+    p.cancel('Cancelled.');
     process.exit(0);
   }
 
-  // Execute chosen command
-  console.log(); // Add spacing
+  const targetPath = resolve(repoPath || defaultPath);
+  const projectName = basename(targetPath);
+  const whiterosePath = join(targetPath, '.whiterose');
+  const isInitialized = existsSync(whiterosePath);
 
-  switch (choice) {
-    case 'init':
-      await initCommand({ provider: 'claude-code', skipQuestions: false, force: false, unsafe: false });
-      break;
-    case 'scan':
-      await scanCommand([], {
-        full: false,
-        json: false,
-        sarif: false,
-        provider: undefined,
-        category: undefined,
-        minConfidence: 'low',
-        adversarial: true,
-        unsafe: false,
-      });
-      break;
-    case 'fix':
-      await fixCommand(undefined, { dryRun: false });
-      break;
-    case 'status':
-      await statusCommand();
-      break;
-    case 'report':
-      await reportCommand({ output: 'BUGS.md', format: 'markdown' });
-      break;
-    case 'refresh':
-      await refreshCommand({ keepConfig: false });
-      break;
-    case 'help':
-      program.help();
-      break;
+  // ─────────────────────────────────────────────────────────────
+  // Step 2: Detect and select LLM provider
+  // ─────────────────────────────────────────────────────────────
+  const detectSpinner = p.spinner();
+  detectSpinner.start('Detecting LLM providers...');
+
+  const availableProviders = await detectProvider();
+  detectSpinner.stop(`Found ${availableProviders.length} provider(s)`);
+
+  if (availableProviders.length === 0) {
+    p.log.error('No LLM providers detected on your system.');
+    console.log();
+    console.log(chalk.dim('  Supported providers:'));
+    console.log(chalk.dim('  - claude-code: ') + chalk.cyan('npm install -g @anthropic-ai/claude-code'));
+    console.log(chalk.dim('  - aider: ') + chalk.cyan('pip install aider-chat'));
+    console.log();
+    p.outro(chalk.red('Install a provider and try again.'));
+    process.exit(1);
   }
+
+  let selectedProvider: ProviderType;
+
+  if (availableProviders.length === 1) {
+    selectedProvider = availableProviders[0];
+    p.log.info(`Using ${chalk.cyan(selectedProvider)} (only available provider)`);
+  } else {
+    const providerChoice = await p.select({
+      message: 'Select LLM provider',
+      options: availableProviders.map((provider) => ({
+        value: provider,
+        label: provider,
+        hint: provider === 'claude-code' ? 'recommended' : undefined,
+      })),
+    });
+
+    if (p.isCancel(providerChoice)) {
+      p.cancel('Cancelled.');
+      process.exit(0);
+    }
+
+    selectedProvider = providerChoice as ProviderType;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 3: Initialize if needed
+  // ─────────────────────────────────────────────────────────────
+  if (!isInitialized) {
+    p.log.warn(`Project "${projectName}" is not initialized.`);
+
+    const shouldInit = await p.confirm({
+      message: 'Initialize whiterose for this project?',
+      initialValue: true,
+    });
+
+    if (p.isCancel(shouldInit) || !shouldInit) {
+      p.cancel('Cannot scan without initialization.');
+      process.exit(0);
+    }
+
+    // Change to target directory for init
+    process.chdir(targetPath);
+
+    await initCommand({
+      provider: selectedProvider,
+      skipQuestions: false,
+      force: false,
+      unsafe: false,
+    });
+
+    console.log(); // spacing after init
+  } else {
+    // Change to target directory
+    process.chdir(targetPath);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 4: Scan depth
+  // ─────────────────────────────────────────────────────────────
+  const scanDepth = await p.select({
+    message: 'Scan depth',
+    options: [
+      {
+        value: 'quick',
+        label: 'Quick scan',
+        hint: 'faster, incremental changes only',
+      },
+      {
+        value: 'deep',
+        label: 'Deep scan',
+        hint: 'thorough, full codebase analysis (recommended)',
+      },
+    ],
+    initialValue: 'deep',
+  });
+
+  if (p.isCancel(scanDepth)) {
+    p.cancel('Cancelled.');
+    process.exit(0);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 5: Start scan
+  // ─────────────────────────────────────────────────────────────
+  console.log();
+  p.log.step('Starting scan...');
+  console.log();
+
+  await scanCommand([], {
+    full: scanDepth === 'deep',
+    json: false,
+    sarif: false,
+    provider: selectedProvider,
+    category: undefined,
+    minConfidence: 'low',
+    adversarial: true,
+    unsafe: false,
+  });
 }
 
-// Show interactive menu when no command provided
+// Show interactive wizard when no command provided
 if (process.argv.length === 2) {
-  showInteractiveMenu().catch((error) => {
+  showInteractiveWizard().catch((error) => {
     console.error(chalk.red('Error:'), error.message);
     process.exit(1);
   });

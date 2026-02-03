@@ -266,17 +266,36 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   } else if (options.sarif) {
     console.log(JSON.stringify(outputSarif(result), null, 2));
   } else {
-    // Save SARIF report
-    if (config.output.sarif) {
-      const sarifPath = join(whiterosePath, 'reports', `${new Date().toISOString().split('T')[0]}.sarif`);
-      writeFileSync(sarifPath, JSON.stringify(outputSarif(result), null, 2));
+    // Create output directory
+    const outputDir = join(cwd, 'whiterose-output');
+    const reportsDir = join(whiterosePath, 'reports');
+    const { mkdirSync } = await import('fs');
+
+    try {
+      mkdirSync(outputDir, { recursive: true });
+      mkdirSync(reportsDir, { recursive: true });
+    } catch {
+      // Directory already exists
     }
 
-    // Generate markdown
-    if (config.output.markdown) {
-      const markdown = outputMarkdown(result);
-      writeFileSync(join(cwd, config.output.markdownPath), markdown);
-    }
+    const timestamp = new Date().toISOString().split('T')[0];
+
+    // Always save all three formats
+    // 1. Markdown
+    const markdown = outputMarkdown(result);
+    const mdPath = join(outputDir, 'bugs.md');
+    writeFileSync(mdPath, markdown);
+
+    // 2. SARIF
+    const sarifPath = join(outputDir, 'bugs.sarif');
+    writeFileSync(sarifPath, JSON.stringify(outputSarif(result), null, 2));
+
+    // 3. JSON
+    const jsonPath = join(outputDir, 'bugs.json');
+    writeFileSync(jsonPath, JSON.stringify(result, null, 2));
+
+    // Also save to reports directory with timestamp for history
+    writeFileSync(join(reportsDir, `${timestamp}.sarif`), JSON.stringify(outputSarif(result), null, 2));
 
     // Show summary
     console.log();
@@ -288,6 +307,13 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     console.log(`  ${chalk.dim('●')} Low: ${result.summary.low}`);
     console.log();
     console.log(`  ${chalk.bold('Total:')} ${result.summary.total} bugs found`);
+    console.log();
+
+    // Show saved files
+    p.log.success('Reports saved:');
+    console.log(`  ${chalk.dim('├')} ${chalk.cyan(mdPath)}`);
+    console.log(`  ${chalk.dim('├')} ${chalk.cyan(sarifPath)}`);
+    console.log(`  ${chalk.dim('└')} ${chalk.cyan(jsonPath)}`);
     console.log();
 
     if (result.summary.total > 0) {

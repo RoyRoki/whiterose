@@ -26,5 +26,6 @@ npm-debug.log*
 .env.local
 .env.*.local
 
-# whiterose cache (in other projects)
+# whiterose cache and output (in other projects)
 .whiterose/cache/
+whiterose-output/
