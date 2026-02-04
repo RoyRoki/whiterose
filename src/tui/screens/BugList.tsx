@@ -79,7 +79,7 @@ export const BugList: React.FC<BugListProps> = ({ bugs, selectedIndex, onSelect,
         const isSelected = actualIndex === localIndex;
 
         return (
-          <Box key={bug.id}>
+          <Box key={`${bug.id}-${actualIndex}`}>
             <Text color={isSelected ? 'cyan' : 'white'}>
               {isSelected ? '▶ ' : '  '}
             </Text>

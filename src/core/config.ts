@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import YAML from 'yaml';
-import { WhiteroseConfig, CodebaseUnderstanding } from '../types.js';
+import { WhiteroseConfig, CodebaseUnderstanding as CodebaseUnderstandingSchema } from '../types.js';
+import type { CodebaseUnderstanding } from '../types.js';
 
 export async function loadConfig(cwd: string): Promise<WhiteroseConfig> {
   const configPath = join(cwd, '.whiterose', 'config.yml');
@@ -24,8 +25,18 @@ export async function loadUnderstanding(cwd: string): Promise<CodebaseUnderstand
     return null;
   }
 
-  const content = readFileSync(understandingPath, 'utf-8');
-  return JSON.parse(content) as CodebaseUnderstanding;
+  try {
+    const content = readFileSync(understandingPath, 'utf-8');
+    const parsed = JSON.parse(content);
+    const result = CodebaseUnderstandingSchema.safeParse(parsed);
+    if (!result.success) {
+      console.error('Warning: Invalid understanding.json, regenerate with "whiterose refresh"');
+      return null;
+    }
+    return result.data;
+  } catch {
+    return null;
+  }
 }
 
 export async function saveConfig(cwd: string, config: WhiteroseConfig): Promise<void> {

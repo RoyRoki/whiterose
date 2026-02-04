@@ -13,6 +13,8 @@ export default defineConfig([
     minify: false,
     target: 'node18',
     banner: { js: '#!/usr/bin/env node' },
+    // Mark TypeScript as external - it uses dynamic require() which breaks in ESM bundles
+    external: ['typescript'],
   },
   // Library build without shebang
   {
@@ -25,5 +27,7 @@ export default defineConfig([
     treeshake: true,
     minify: false,
     target: 'node18',
+    // Mark TypeScript as external - it uses dynamic require() which breaks in ESM bundles
+    external: ['typescript'],
   },
 ]);

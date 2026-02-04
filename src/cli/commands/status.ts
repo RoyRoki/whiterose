@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { loadConfig, loadUnderstanding } from '../../core/config.js';
 import { detectProvider } from '../../providers/detect.js';
+import { getAccumulatedBugsStats } from '../../core/bug-merger.js';
 
 export async function statusCommand(): Promise<void> {
   const cwd = process.cwd();
@@ -45,10 +46,29 @@ export async function statusCommand(): Promise<void> {
   // Check cache status
   const hashesPath = join(whiterosePath, 'cache', 'file-hashes.json');
   if (existsSync(hashesPath)) {
-    const hashes = JSON.parse(readFileSync(hashesPath, 'utf-8'));
-    console.log(chalk.bold('  Cache'));
-    console.log(`  ${chalk.dim('Files tracked:')} ${hashes.fileHashes?.length || 0}`);
-    console.log(`  ${chalk.dim('Last full scan:')} ${hashes.lastFullScan || 'never'}`);
+    try {
+      const hashes = JSON.parse(readFileSync(hashesPath, 'utf-8'));
+      console.log(chalk.bold('  Cache'));
+      console.log(`  ${chalk.dim('Files tracked:')} ${hashes.fileHashes?.length || 0}`);
+      console.log(`  ${chalk.dim('Last full scan:')} ${hashes.lastFullScan || 'never'}`);
+      console.log();
+    } catch {
+      // Corrupted cache file, skip displaying cache info
+    }
+  }
+
+  // Check accumulated bugs
+  const bugStats = getAccumulatedBugsStats(cwd);
+  if (bugStats.total > 0) {
+    console.log(chalk.bold('  Accumulated Bugs'));
+    console.log(`  ${chalk.dim('Total:')} ${bugStats.total}`);
+    if (Object.keys(bugStats.bySeverity).length > 0) {
+      for (const [severity, count] of Object.entries(bugStats.bySeverity)) {
+        const color = severity === 'critical' ? 'red' : severity === 'high' ? 'yellow' : severity === 'medium' ? 'blue' : 'dim';
+        console.log(`    ${chalk[color]('●')} ${severity}: ${count}`);
+      }
+    }
+    console.log(`  ${chalk.dim('Last updated:')} ${new Date(bugStats.lastUpdated).toLocaleString()}`);
     console.log();
   }
 
@@ -64,18 +84,13 @@ export async function statusCommand(): Promise<void> {
       console.log(chalk.bold('  Last Scan'));
       console.log(`  ${chalk.dim('Report:')} ${latestReport}`);
       console.log(`  ${chalk.dim('Date:')} ${stats.mtime.toISOString()}`);
-
-      // Try to get bug count from report
-      try {
-        const sarif = JSON.parse(readFileSync(reportPath, 'utf-8'));
-        const bugCount = sarif.runs?.[0]?.results?.length || 0;
-        console.log(`  ${chalk.dim('Bugs found:')} ${bugCount}`);
-      } catch {
-        // Ignore parse errors
-      }
       console.log();
     }
   }
 
-  p.outro(chalk.dim('Run "whiterose scan" to scan for bugs'));
+  if (bugStats.total > 0) {
+    p.outro(chalk.dim('Run "whiterose fix" to fix bugs, or "whiterose clear" to reset'));
+  } else {
+    p.outro(chalk.dim('Run "whiterose scan" to scan for bugs'));
+  }
 }

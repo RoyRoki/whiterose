@@ -13,9 +13,10 @@ import YAML from 'yaml';
 
 interface InitOptions {
   provider: string;
-  skipQuestions: boolean;
+  skipQuestions?: boolean;
   force: boolean;
-  unsafe: boolean;
+  ci?: boolean; // CI mode: non-interactive, use defaults
+  unsafe?: boolean; // Deprecated: read-only operations always auto-approve
   skipProviderDetection?: boolean; // Skip provider detection when already verified (e.g., from wizard)
 }
 
@@ -168,11 +169,7 @@ export async function initCommand(options: InitOptions): Promise<void> {
   try {
     const provider = await getProvider(selectedProvider);
 
-    // Enable unsafe mode if requested (bypasses LLM permission prompts)
-    if (options.unsafe && 'setUnsafeMode' in provider) {
-      (provider as any).setUnsafeMode(true);
-      p.log.warn('Running in unsafe mode (--unsafe). LLM permission prompts are bypassed.');
-    }
+    // Note: Read-only operations (init) always auto-approve via --dangerously-skip-permissions
 
     // Set up progress callback to update spinner
     if ('setProgressCallback' in provider) {
@@ -195,7 +192,8 @@ export async function initCommand(options: InitOptions): Promise<void> {
   // ─────────────────────────────────────────────────────────────
   // Phase 4: Show summary and confirm understanding
   // ─────────────────────────────────────────────────────────────
-  if (!options.skipQuestions) {
+  const skipInteractive = options.skipQuestions || options.ci;
+  if (!skipInteractive) {
     p.log.message(chalk.bold('\nHere\'s what I understand about your codebase:\n'));
     p.log.message(`  ${chalk.cyan('Type:')} ${understanding.summary.type}`);
     p.log.message(`  ${chalk.cyan('Framework:')} ${understanding.summary.framework || 'None detected'}`);
@@ -229,49 +227,14 @@ export async function initCommand(options: InitOptions): Promise<void> {
       p.log.info('You can edit .whiterose/intent.md after initialization to correct the understanding.');
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Phase 5: Priority questions based on detected features
-    // ─────────────────────────────────────────────────────────────
+    // Priorities are now auto-determined by the LLM based on detected features
+    // Auth, payments, checkout = critical. User data = high. UI = medium. etc.
     const priorities: Record<string, 'critical' | 'high' | 'medium' | 'low' | 'ignore'> = {};
-
-    // Ask about critical features
-    for (const feature of understanding.features.filter((f) => f.priority === 'critical').slice(0, 3)) {
-      const priority = await p.select({
-        message: `I detected ${chalk.bold(feature.name)}. How should I prioritize bugs here?`,
-        options: [
-          { value: 'critical', label: 'Critical', hint: 'highest priority' },
-          { value: 'high', label: 'High' },
-          { value: 'medium', label: 'Medium' },
-          { value: 'low', label: 'Low' },
-          { value: 'ignore', label: 'Ignore', hint: 'skip this area' },
-        ],
-        initialValue: 'critical',
-      });
-
-      if (p.isCancel(priority)) {
-        p.cancel('Initialization cancelled.');
-        process.exit(0);
-      }
-
-      // Map feature to file patterns
+    for (const feature of understanding.features) {
       for (const file of feature.relatedFiles) {
-        priorities[file] = priority as typeof priorities[string];
+        priorities[file] = feature.priority;
       }
     }
-
-    // Ask about areas of concern
-    const areasOfConcern = await p.text({
-      message: 'Any specific files or directories you want me to focus on? (comma-separated, or leave empty)',
-      placeholder: 'src/api/checkout.ts, src/hooks/useAuth.ts',
-    });
-
-    if (!p.isCancel(areasOfConcern) && areasOfConcern) {
-      for (const area of areasOfConcern.split(',').map((s) => s.trim())) {
-        priorities[area] = 'critical';
-      }
-    }
-
-    // Store priorities in understanding for config generation
     (understanding as any)._userPriorities = priorities;
   }
 
@@ -293,7 +256,12 @@ export async function initCommand(options: InitOptions): Promise<void> {
       include: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'],
       exclude: ['node_modules', 'dist', 'build', '.next', 'coverage', '**/*.test.*', '**/*.spec.*'],
       priorities: (understanding as any)._userPriorities || {},
-      categories: ['logic-error', 'security', 'async-race-condition', 'edge-case', 'null-reference'],
+      categories: [
+        'injection', 'auth-bypass', 'secrets-exposure',
+        'null-reference', 'boundary-error', 'resource-leak', 'async-issue',
+        'logic-error', 'data-validation', 'type-coercion',
+        'concurrency', 'intent-violation',
+      ],
       minConfidence: 'low',
       staticAnalysis: {
         typescript: true,

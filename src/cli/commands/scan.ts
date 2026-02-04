@@ -10,6 +10,9 @@ import { runStaticAnalysis } from '../../analysis/static.js';
 import { generateBugId } from '../../core/utils.js';
 import { outputSarif } from '../../output/sarif.js';
 import { outputMarkdown } from '../../output/markdown.js';
+import { mergeBugs, getAccumulatedBugsStats } from '../../core/bug-merger.js';
+import { analyzeCrossFile } from '../../core/cross-file-analyzer.js';
+import { analyzeContracts } from '../../core/contract-analyzer.js';
 import YAML from 'yaml';
 
 interface ScanOptions {
@@ -19,48 +22,66 @@ interface ScanOptions {
   provider?: string;
   category?: string[];
   minConfidence: string;
-  adversarial: boolean;
-  unsafe: boolean;
+  ci?: boolean; // CI mode: non-interactive, exit 1 if bugs found
+  quick?: boolean; // Quick scan: parallel single-file analysis, works without init
+  unsafe?: boolean; // Deprecated: read-only operations always auto-approve
 }
 
 export async function scanCommand(paths: string[], options: ScanOptions): Promise<void> {
   const cwd = process.cwd();
   const whiterosePath = join(cwd, '.whiterose');
 
-  // Check if initialized
-  if (!existsSync(whiterosePath)) {
-    if (!options.json && !options.sarif) {
+  // Quick scan mode: works without init, uses changed files only
+  const isQuickScan = options.quick || options.ci;
+  const isQuiet = options.json || options.sarif || options.ci;
+
+  // For thorough scan, require init
+  if (!isQuickScan && !existsSync(whiterosePath)) {
+    if (!isQuiet) {
       p.log.error('whiterose is not initialized in this directory.');
-      p.log.info('Run "whiterose init" first.');
+      p.log.info('Run "whiterose init" first, or use --quick for fast pre-commit scanning.');
     } else {
       console.error(JSON.stringify({ error: 'Not initialized. Run whiterose init first.' }));
     }
     process.exit(1);
   }
 
-  const isQuiet = options.json || options.sarif;
-
   if (!isQuiet) {
-    p.intro(chalk.red('whiterose') + chalk.dim(' - scanning for bugs'));
+    const scanMode = isQuickScan ? 'quick scan (pre-commit)' : 'thorough scan';
+    p.intro(chalk.red('whiterose') + chalk.dim(` - ${scanMode}`));
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Load config and understanding
+  // Load config and understanding (optional for quick scan)
   // ─────────────────────────────────────────────────────────────
-  let config: WhiteroseConfig;
-  try {
-    config = await loadConfig(cwd);
-  } catch (error) {
-    if (!isQuiet) p.log.error(`Failed to load config: ${error}`);
-    process.exit(1);
-  }
+  let config: WhiteroseConfig | undefined;
+  let understanding: any;
 
-  const understanding = await loadUnderstanding(cwd);
-  if (!understanding) {
-    if (!isQuiet) {
-      p.log.error('No codebase understanding found. Run "whiterose refresh" to regenerate.');
+  if (existsSync(whiterosePath)) {
+    try {
+      config = await loadConfig(cwd);
+      understanding = await loadUnderstanding(cwd);
+    } catch {
+      // For quick scan, we can continue without config
     }
-    process.exit(1);
+  }
+
+  // Create minimal understanding for quick scan if none exists
+  if (!understanding) {
+    understanding = {
+      version: '1',
+      generatedAt: new Date().toISOString(),
+      summary: {
+        type: 'unknown',
+        framework: 'unknown',
+        language: 'typescript', // Assume TS for now
+        description: 'Quick scan mode - no understanding available',
+      },
+      features: [],
+      contracts: [],
+      dependencies: {},
+      structure: { totalFiles: 0, totalLines: 0 },
+    };
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -80,10 +101,16 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
       filesToScan = paths.length > 0 ? paths : await scanCodebase(cwd, config);
     }
   } else {
-    // Incremental scan
-    scanType = 'incremental';
-    const changed = await getChangedFiles(cwd, config);
-    filesToScan = changed.files;
+    // Incremental scan requires config
+    if (!config) {
+      // Fall back to full scan if no config
+      scanType = 'full';
+      filesToScan = await scanCodebase(cwd);
+    } else {
+      scanType = 'incremental';
+      const changed = await getChangedFiles(cwd, config);
+      filesToScan = changed.files;
+    }
 
     if (filesToScan.length === 0) {
       if (!isQuiet) {
@@ -115,33 +142,25 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   // ─────────────────────────────────────────────────────────────
   // LLM Analysis
   // ─────────────────────────────────────────────────────────────
-  const providerName = options.provider || config.provider;
+  const providerName = options.provider || config?.provider || 'claude-code';
   const provider = await getProvider(providerName as any);
 
-  // Enable unsafe mode if requested (bypasses LLM permission prompts)
-  if (options.unsafe) {
-    if ('setUnsafeMode' in provider) {
-      (provider as any).setUnsafeMode(true);
-      if (!isQuiet) {
-        p.log.warn('Running in unsafe mode (--unsafe). LLM permission prompts are bypassed.');
-      }
-    }
-  }
+  // Note: Read-only operations (scan) always auto-approve via --dangerously-skip-permissions
+  // The unsafe flag is only relevant for fix operations
 
   let bugs: Bug[];
   if (!isQuiet) {
     const llmSpinner = p.spinner();
     const analysisStartTime = Date.now();
-    llmSpinner.start(`Analyzing with ${providerName}... (this may take 1-2 minutes)`);
+    llmSpinner.start(`Analyzing with ${providerName}...`);
 
-    // Update spinner with elapsed time every 5 seconds
-    const analysisTimeInterval = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - analysisStartTime) / 1000);
-      const minutes = Math.floor(elapsed / 60);
-      const seconds = elapsed % 60;
-      const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-      llmSpinner.message(`Analyzing with ${providerName}... (${timeStr} elapsed)`);
-    }, 5000);
+    // Hook into provider's progress callback to show real-time updates
+    if ('setProgressCallback' in provider) {
+      (provider as any).setProgressCallback((message: string) => {
+        // Show the progress message (file being scanned, bugs found, etc.)
+        llmSpinner.message(message);
+      });
+    }
 
     try {
       bugs = await provider.analyze({
@@ -149,12 +168,10 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
         understanding,
         config,
         staticAnalysisResults: staticResults,
-      });
-      clearInterval(analysisTimeInterval);
+      }, { quick: isQuickScan });
       const totalTime = Math.floor((Date.now() - analysisStartTime) / 1000);
       llmSpinner.stop(`Found ${bugs.length} potential bugs (${totalTime}s)`);
     } catch (error) {
-      clearInterval(analysisTimeInterval);
       llmSpinner.stop('Analysis failed');
       p.log.error(String(error));
       process.exit(1);
@@ -165,62 +182,76 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
       understanding,
       config,
       staticAnalysisResults: staticResults,
-    });
+    }, { quick: isQuickScan });
+  }
+
+  // Note: Adversarial validation is now inline during analysis
+  // Claude validates each bug before reporting it
+
+  // ─────────────────────────────────────────────────────────────
+  // Cross-file analysis (finds bugs spanning multiple files)
+  // ─────────────────────────────────────────────────────────────
+  if (!isQuickScan) {
+    if (!isQuiet) {
+      const crossFileSpinner = p.spinner();
+      crossFileSpinner.start('Running cross-file analysis...');
+      try {
+        const crossFileBugs = await analyzeCrossFile(cwd);
+        if (crossFileBugs.length > 0) {
+          bugs.push(...crossFileBugs);
+          crossFileSpinner.stop(`Cross-file analysis: ${crossFileBugs.length} issues found`);
+        } else {
+          crossFileSpinner.stop('Cross-file analysis: no issues');
+        }
+      } catch {
+        crossFileSpinner.stop('Cross-file analysis: skipped');
+      }
+    } else {
+      try {
+        const crossFileBugs = await analyzeCrossFile(cwd);
+        bugs.push(...crossFileBugs);
+      } catch {
+        // Skip on error
+      }
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Adversarial validation
+  // Contract analysis (finds missing rollback, verification, etc.)
   // ─────────────────────────────────────────────────────────────
-  if (options.adversarial && bugs.length > 0) {
+  if (!isQuickScan) {
     if (!isQuiet) {
-      const advSpinner = p.spinner();
-      advSpinner.start('Running adversarial validation...');
-
-      const validatedBugs: Bug[] = [];
-      for (const bug of bugs) {
-        const result = await provider.adversarialValidate(bug, {
-          files: filesToScan,
-          understanding,
-          config,
-          staticAnalysisResults: staticResults,
-        });
-
-        if (result.survived) {
-          validatedBugs.push({
-            ...bug,
-            confidence: result.adjustedConfidence || bug.confidence,
-          });
+      const contractSpinner = p.spinner();
+      contractSpinner.start('Running contract analysis...');
+      try {
+        const contractBugs = await analyzeContracts(cwd);
+        if (contractBugs.length > 0) {
+          bugs.push(...contractBugs);
+          contractSpinner.stop(`Contract analysis: ${contractBugs.length} issues found`);
+        } else {
+          contractSpinner.stop('Contract analysis: no issues');
         }
+      } catch {
+        contractSpinner.stop('Contract analysis: skipped');
       }
-
-      const filtered = bugs.length - validatedBugs.length;
-      advSpinner.stop(`Adversarial validation: ${filtered} false positives filtered`);
-      bugs = validatedBugs;
     } else {
-      const validatedBugs: Bug[] = [];
-      for (const bug of bugs) {
-        const result = await provider.adversarialValidate(bug, {
-          files: filesToScan,
-          understanding,
-          config,
-          staticAnalysisResults: staticResults,
-        });
-        if (result.survived) {
-          validatedBugs.push({
-            ...bug,
-            confidence: result.adjustedConfidence || bug.confidence,
-          });
-        }
+      try {
+        const contractBugs = await analyzeContracts(cwd);
+        bugs.push(...contractBugs);
+      } catch {
+        // Skip on error
       }
-      bugs = validatedBugs;
     }
   }
 
   // ─────────────────────────────────────────────────────────────
   // Filter by confidence
   // ─────────────────────────────────────────────────────────────
-  const minConfidence = options.minConfidence as ConfidenceLevel;
-  const confidenceOrder = { high: 3, medium: 2, low: 1 };
+  const confidenceOrder: Record<ConfidenceLevel, number> = { high: 3, medium: 2, low: 1 };
+  const validConfidenceLevels: ConfidenceLevel[] = ['high', 'medium', 'low'];
+  const minConfidence: ConfidenceLevel = validConfidenceLevels.includes(options.minConfidence as ConfidenceLevel)
+    ? (options.minConfidence as ConfidenceLevel)
+    : 'low';
   bugs = bugs.filter((bug) => confidenceOrder[bug.confidence.overall] >= confidenceOrder[minConfidence]);
 
   // ─────────────────────────────────────────────────────────────
@@ -239,6 +270,22 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   }));
 
   // ─────────────────────────────────────────────────────────────
+  // Merge with accumulated bugs (union across scans)
+  // ─────────────────────────────────────────────────────────────
+  const mergeResult = mergeBugs(bugs, cwd);
+  const newBugsThisScan = mergeResult.stats.newBugs;
+
+  if (!isQuiet && mergeResult.stats.existingBugs > 0) {
+    p.log.info(
+      `Merged: ${newBugsThisScan} new bugs + ${mergeResult.stats.existingBugs} existing = ${mergeResult.stats.total} total` +
+      (mergeResult.stats.duplicatesSkipped > 0 ? ` (${mergeResult.stats.duplicatesSkipped} duplicates skipped)` : '')
+    );
+  }
+
+  // Use the full accumulated bug list for output
+  const allBugs = mergeResult.bugs;
+
+  // ─────────────────────────────────────────────────────────────
   // Create scan result
   // ─────────────────────────────────────────────────────────────
   const result: ScanResult = {
@@ -248,23 +295,32 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     filesScanned: filesToScan.length,
     filesChanged: scanType === 'incremental' ? filesToScan.length : undefined,
     duration: 0, // TODO: track actual duration
-    bugs,
+    bugs: allBugs, // Use accumulated bugs (union across all scans)
     summary: {
-      critical: bugs.filter((b) => b.severity === 'critical').length,
-      high: bugs.filter((b) => b.severity === 'high').length,
-      medium: bugs.filter((b) => b.severity === 'medium').length,
-      low: bugs.filter((b) => b.severity === 'low').length,
-      total: bugs.length,
+      critical: allBugs.filter((b) => b.severity === 'critical').length,
+      high: allBugs.filter((b) => b.severity === 'high').length,
+      medium: allBugs.filter((b) => b.severity === 'medium').length,
+      low: allBugs.filter((b) => b.severity === 'low').length,
+      total: allBugs.length,
     },
   };
 
   // ─────────────────────────────────────────────────────────────
   // Output
   // ─────────────────────────────────────────────────────────────
-  if (options.json) {
+  if (options.json || (options.ci && !options.sarif)) {
+    // JSON output (default for CI mode)
     console.log(JSON.stringify(result, null, 2));
+    // CI mode: exit with code 1 if bugs found
+    if (options.ci && result.summary.total > 0) {
+      process.exit(1);
+    }
   } else if (options.sarif) {
     console.log(JSON.stringify(outputSarif(result), null, 2));
+    // CI mode: exit with code 1 if bugs found
+    if (options.ci && result.summary.total > 0) {
+      process.exit(1);
+    }
   } else {
     // Create output directory
     const outputDir = join(cwd, 'whiterose-output');
@@ -306,7 +362,10 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     console.log(`  ${chalk.blue('●')} Medium: ${result.summary.medium}`);
     console.log(`  ${chalk.dim('●')} Low: ${result.summary.low}`);
     console.log();
-    console.log(`  ${chalk.bold('Total:')} ${result.summary.total} bugs found`);
+    if (newBugsThisScan > 0) {
+      console.log(`  ${chalk.green('+')} New this scan: ${newBugsThisScan}`);
+    }
+    console.log(`  ${chalk.bold('Total accumulated:')} ${result.summary.total} bugs`);
     console.log();
 
     // Show saved files

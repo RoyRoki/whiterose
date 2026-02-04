@@ -6,18 +6,22 @@ import { WhiteroseConfig, StaticAnalysisResult } from '../types.js';
 export async function runStaticAnalysis(
   cwd: string,
   files: string[],
-  config: WhiteroseConfig
+  config?: WhiteroseConfig
 ): Promise<StaticAnalysisResult[]> {
   const results: StaticAnalysisResult[] = [];
 
+  // Default to running both if config is not provided
+  const shouldRunTypescript = config?.staticAnalysis?.typescript ?? true;
+  const shouldRunEslint = config?.staticAnalysis?.eslint ?? true;
+
   // Run TypeScript compiler
-  if (config.staticAnalysis.typescript) {
+  if (shouldRunTypescript) {
     const tscResults = await runTypeScript(cwd);
     results.push(...tscResults);
   }
 
   // Run ESLint
-  if (config.staticAnalysis.eslint) {
+  if (shouldRunEslint) {
     const eslintResults = await runEslint(cwd, files);
     results.push(...eslintResults);
   }
@@ -92,7 +96,23 @@ async function runEslint(cwd: string, files: string[]): Promise<StaticAnalysisRe
       }
     );
 
-    const eslintResults = JSON.parse(stdout || '[]');
+    // ESLint may output warnings before JSON - try to extract JSON array
+    let eslintResults: any[] = [];
+    try {
+      // First try direct parse
+      eslintResults = JSON.parse(stdout || '[]');
+    } catch {
+      // Try to find JSON array in output (skip any prefix warnings)
+      const jsonMatch = (stdout || '').match(/\[\s*\{[\s\S]*\}\s*\]|\[\s*\]/);
+      if (jsonMatch) {
+        try {
+          eslintResults = JSON.parse(jsonMatch[0]);
+        } catch {
+          // Give up - ESLint output is not parseable
+          return results;
+        }
+      }
+    }
 
     for (const fileResult of eslintResults) {
       for (const message of fileResult.messages || []) {
@@ -107,7 +127,7 @@ async function runEslint(cwd: string, files: string[]): Promise<StaticAnalysisRe
       }
     }
   } catch {
-    // ESLint failed, skip
+    // ESLint execution failed, skip
   }
 
   return results;

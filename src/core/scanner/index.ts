@@ -33,7 +33,8 @@ export async function scanCodebase(cwd: string, config?: WhiteroseConfig): Promi
 }
 
 export function hashFile(filePath: string): string {
-  const content = readFileSync(filePath, 'utf-8');
+  // Read as buffer to correctly hash any file type (including binary)
+  const content = readFileSync(filePath);
   return createHash('md5').update(content).digest('hex');
 }
 
@@ -53,7 +54,11 @@ export async function getChangedFiles(
   };
 
   if (existsSync(cachePath)) {
-    cachedState = JSON.parse(readFileSync(cachePath, 'utf-8'));
+    try {
+      cachedState = JSON.parse(readFileSync(cachePath, 'utf-8'));
+    } catch {
+      // Corrupted cache, use default empty state
+    }
   }
 
   const cachedHashes = new Map(cachedState.fileHashes.map((h) => [h.path, h.hash]));

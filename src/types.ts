@@ -7,15 +7,28 @@ import { z } from 'zod';
 export const BugSeverity = z.enum(['critical', 'high', 'medium', 'low']);
 export type BugSeverity = z.infer<typeof BugSeverity>;
 
+// 12 categories grouped into 4 families:
+// SECURITY: injection, auth-bypass, secrets-exposure
+// RELIABILITY: null-reference, boundary-error, resource-leak, async-issue
+// CORRECTNESS: logic-error, data-validation, type-coercion
+// DESIGN: concurrency, intent-violation
 export const BugCategory = z.enum([
-  'logic-error',
-  'security',
-  'async-race-condition',
-  'edge-case',
-  'null-reference',
-  'type-coercion',
-  'resource-leak',
-  'intent-violation',
+  // Security (external threats)
+  'injection',           // SQL injection, XSS, command injection, path traversal
+  'auth-bypass',         // Authentication/authorization flaws, privilege escalation
+  'secrets-exposure',    // Hardcoded credentials, leaked tokens, exposed API keys
+  // Reliability (runtime failures)
+  'null-reference',      // Null/undefined dereference, optional chaining needed
+  'boundary-error',      // Off-by-one, array bounds, integer overflow, loop issues
+  'resource-leak',       // Unclosed connections, file handles, memory leaks, timers
+  'async-issue',         // Missing await, unhandled promises, race conditions
+  // Correctness (wrong behavior)
+  'logic-error',         // Wrong operators, incorrect conditions, bad math, wrong comparisons
+  'data-validation',     // Missing input validation, format checking, sanitization
+  'type-coercion',       // Implicit coercion bugs, wrong type handling, NaN propagation
+  // Design (intent violations)
+  'concurrency',         // Thread safety, deadlocks, shared state mutation
+  'intent-violation',    // Code does opposite of what comments/names suggest
 ]);
 export type BugCategory = z.infer<typeof BugCategory>;
 
@@ -41,6 +54,9 @@ export const CodePathStep = z.object({
 });
 export type CodePathStep = z.infer<typeof CodePathStep>;
 
+export const BugStatus = z.enum(['open', 'fixed', 'false-positive', 'wont-fix']);
+export type BugStatus = z.infer<typeof BugStatus>;
+
 export const Bug = z.object({
   id: z.string(),
   title: z.string(),
@@ -57,6 +73,10 @@ export const Bug = z.object({
   relatedContract: z.string().optional(),
   staticAnalysisSignals: z.array(z.string()).optional(),
   createdAt: z.string().datetime(),
+  // Fix tracking
+  status: BugStatus.default('open'),
+  fixedAt: z.string().datetime().optional(),
+  fixCommit: z.string().optional(),
 });
 export type Bug = z.infer<typeof Bug>;
 
@@ -106,13 +126,24 @@ export const WhiteroseConfig = z.object({
     .record(z.string(), PriorityLevel)
     .default({}),
 
-  // Bug categories to scan for
+  // Bug categories to scan for (all 12 categories by default)
   categories: z.array(BugCategory).default([
-    'logic-error',
-    'security',
-    'async-race-condition',
-    'edge-case',
+    // Security
+    'injection',
+    'auth-bypass',
+    'secrets-exposure',
+    // Reliability
     'null-reference',
+    'boundary-error',
+    'resource-leak',
+    'async-issue',
+    // Correctness
+    'logic-error',
+    'data-validation',
+    'type-coercion',
+    // Design
+    'concurrency',
+    'intent-violation',
   ]),
 
   // Confidence threshold for reporting
@@ -216,7 +247,7 @@ export type CacheState = z.infer<typeof CacheState>;
 export interface AnalysisContext {
   files: string[];
   understanding: CodebaseUnderstanding;
-  config: WhiteroseConfig;
+  config?: WhiteroseConfig; // Optional for quick scan mode
   staticAnalysisResults: StaticAnalysisResult[];
 }
 
@@ -229,11 +260,15 @@ export interface StaticAnalysisResult {
   code?: string;
 }
 
+export interface AnalyzeOptions {
+  quick?: boolean; // Quick scan: parallel single-file analysis (for pre-commit hooks)
+}
+
 export interface LLMProvider {
   name: ProviderType;
   detect(): Promise<boolean>;
   isAvailable(): Promise<boolean>;
-  analyze(context: AnalysisContext): Promise<Bug[]>;
+  analyze(context: AnalysisContext, options?: AnalyzeOptions): Promise<Bug[]>;
   adversarialValidate(bug: Bug, context: AnalysisContext): Promise<AdversarialResult>;
   generateUnderstanding(files: string[], existingDocsSummary?: string): Promise<CodebaseUnderstanding>;
 }

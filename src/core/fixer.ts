@@ -1,8 +1,10 @@
 import { execa } from 'execa';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
 import { dirname, basename, resolve, relative, isAbsolute } from 'path';
 import { Bug, WhiteroseConfig } from '../types.js';
 import { createFixBranch, commitFix } from './git.js';
+import { getProviderCommand } from '../providers/detect.js';
+import { markBugAsFixed } from './bug-status.js';
 
 /**
  * Validates that a file path is within the project directory.
@@ -21,20 +23,32 @@ function isPathWithinProject(filePath: string, projectDir: string): boolean {
  * Returns the resolved absolute path if valid, throws if invalid.
  */
 function validateFilePath(filePath: string, projectDir: string): string {
+  // Check for null bytes first (can bypass other checks)
+  if (filePath.includes('\0')) {
+    throw new Error(`Security: Invalid file path contains null byte: ${filePath}`);
+  }
+
   // Resolve to absolute path
   const resolvedPath = isAbsolute(filePath) ? filePath : resolve(projectDir, filePath);
 
-  // Check for path traversal
-  if (!isPathWithinProject(resolvedPath, projectDir)) {
+  // Resolve symlinks to get real path (prevents symlink bypass attacks)
+  let realPath: string;
+  let realProjectDir: string;
+  try {
+    realPath = existsSync(resolvedPath) ? realpathSync(resolvedPath) : resolvedPath;
+    realProjectDir = realpathSync(projectDir);
+  } catch {
+    // If realpath fails, use resolved paths
+    realPath = resolvedPath;
+    realProjectDir = projectDir;
+  }
+
+  // Check real path is within project (after symlink resolution)
+  if (!isPathWithinProject(realPath, realProjectDir)) {
     throw new Error(`Security: Refusing to access file outside project directory: ${filePath}`);
   }
 
-  // Check for suspicious patterns
-  if (filePath.includes('\0') || filePath.includes('..')) {
-    throw new Error(`Security: Invalid file path contains suspicious characters: ${filePath}`);
-  }
-
-  return resolvedPath;
+  return realPath;
 }
 
 interface FixOptions {
@@ -47,6 +61,7 @@ interface FixResult {
   diff?: string;
   error?: string;
   branchName?: string;
+  commitHash?: string;
 }
 
 export async function applyFix(
@@ -128,15 +143,20 @@ export async function applyFix(
   // Write the fixed content (using validated safe path)
   writeFileSync(safePath, fixedContent, 'utf-8');
 
-  // Commit the change
+  // Commit the change and get commit hash
+  let commitHash: string | undefined;
   if (branchName || !branch) {
-    await commitFix(bug);
+    commitHash = await commitFix(bug);
   }
+
+  // Track fix in bug status
+  markBugAsFixed(bug, commitHash, projectDir);
 
   return {
     success: true,
     diff,
     branchName,
+    commitHash,
   };
 }
 
@@ -187,7 +207,7 @@ function applySimpleFix(
 
 async function generateAndApplyFix(
   bug: Bug,
-  _config: WhiteroseConfig,
+  config: WhiteroseConfig,
   originalContent: string,
   safePath?: string
 ): Promise<{ success: boolean; content?: string; diff?: string; error?: string }> {
@@ -198,10 +218,12 @@ async function generateAndApplyFix(
     // Use validated path for cwd, fallback to process.cwd()
     const workingDir = safePath ? dirname(safePath) : process.cwd();
 
+    // Get the command for the configured provider
+    const providerCommand = getProviderCommand(config.provider);
+
     // Use the provider to generate a fix
-    // We'll use execa directly since we need a specific prompt format
     const { stdout } = await execa(
-      'claude',
+      providerCommand,
       ['-p', prompt, '--output-format', 'text'],
       {
         cwd: workingDir,

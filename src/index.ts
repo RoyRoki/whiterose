@@ -18,3 +18,6 @@ export { applyFix, batchFix } from './core/fixer.js';
 export * from './core/git.js';
 export * from './core/dependencies.js';
 export * from './core/monorepo.js';
+export { analyzeCrossFile, getCommandEffectsSummary } from './core/cross-file-analyzer.js';
+export { analyzeContracts, getContractSummary } from './core/contract-analyzer.js';
+export { analyzeSmells, getSmellsSummary } from './core/smells-analyzer.js';

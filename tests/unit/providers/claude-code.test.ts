@@ -269,7 +269,7 @@ describe('providers/adapters/claude-code', () => {
       expect(progressMessages).toContain('Scanning: src/api.ts');
     });
 
-    it('should call spawn with correct arguments (no unsafe flag by default)', async () => {
+    it('should always include --dangerously-skip-permissions (read-only operations auto-approve)', async () => {
       const mockProcess = createMockSpawnProcess(['###COMPLETE']);
       vi.mocked(spawn).mockReturnValue(mockProcess as any);
 
@@ -282,29 +282,9 @@ describe('providers/adapters/claude-code', () => {
 
       expect(spawn).toHaveBeenCalledWith(
         'claude',
-        expect.arrayContaining(['--verbose', '-p']),
+        expect.arrayContaining(['--verbose', '-p', '--dangerously-skip-permissions']),
         expect.objectContaining({ env: expect.any(Object) })
       );
-      // Should NOT contain the unsafe flag by default
-      const callArgs = vi.mocked(spawn).mock.calls[0][1] as string[];
-      expect(callArgs).not.toContain('--allowedTools');
-    });
-
-    it('should include --allowedTools when unsafe mode is enabled', async () => {
-      const mockProcess = createMockSpawnProcess(['###COMPLETE']);
-      vi.mocked(spawn).mockReturnValue(mockProcess as any);
-
-      provider.setUnsafeMode(true);
-
-      await provider.analyze({
-        files: ['/project/src/test.ts'],
-        understanding: mockUnderstanding,
-        config: {} as any,
-        staticAnalysisResults: [],
-      });
-
-      const callArgs = vi.mocked(spawn).mock.calls[0][1] as string[];
-      expect(callArgs).toContain('--allowedTools');
     });
   });
 

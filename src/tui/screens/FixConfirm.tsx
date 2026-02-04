@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import Spinner from 'ink-spinner';
 import { Bug } from '../../types.js';
@@ -13,6 +13,16 @@ interface FixConfirmProps {
 export const FixConfirm: React.FC<FixConfirmProps> = ({ bug, dryRun, onConfirm, onCancel }) => {
   const [status, setStatus] = useState<'confirm' | 'fixing' | 'done' | 'error'>('confirm');
   const [error, setError] = useState<string | null>(null);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup timeout on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, []);
 
   useInput(async (input, key) => {
     if (status !== 'confirm') return;
@@ -22,8 +32,8 @@ export const FixConfirm: React.FC<FixConfirmProps> = ({ bug, dryRun, onConfirm, 
       try {
         await onConfirm();
         setStatus('done');
-        // Auto-close after success
-        setTimeout(() => {
+        // Auto-close after success (with cleanup support)
+        timeoutRef.current = setTimeout(() => {
           onCancel();
         }, 1500);
       } catch (e: any) {

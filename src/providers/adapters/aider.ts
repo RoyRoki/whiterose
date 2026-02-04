@@ -471,18 +471,11 @@ Output JSON ONLY describing:
     const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (codeBlockMatch) return codeBlockMatch[1].trim();
 
-    // Use non-greedy matching to find first complete JSON array
-    const arrayMatch = text.match(/\[[\s\S]*?\]/);
-private extractJson(text: string): string | null {
-    // Try code blocks first (most reliable)
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (codeBlockMatch) return codeBlockMatch[1].trim();
-
-    // Find balanced JSON using bracket counting
+    // Find balanced JSON using bracket counting (handles nested objects)
     return this.findBalancedJson(text);
-    }
+  }
 
-    private findBalancedJson(text: string): string | null {
+  private findBalancedJson(text: string): string | null {
     const objectStart = text.indexOf('{');
     const arrayStart = text.indexOf('[');
 
@@ -491,42 +484,45 @@ private extractJson(text: string): string | null {
     let closeChar = '}';
 
     if (objectStart === -1 && arrayStart === -1) return null;
-    if (objectStart === -1) { start = arrayStart; openChar = '['; closeChar = ']'; }
-    else if (arrayStart === -1) { start = objectStart; }
-    else if (arrayStart < objectStart) { start = arrayStart; openChar = '['; closeChar = ']'; }
-    else { start = objectStart; }
+    if (objectStart === -1) {
+      start = arrayStart;
+      openChar = '[';
+      closeChar = ']';
+    } else if (arrayStart === -1) {
+      start = objectStart;
+    } else if (arrayStart < objectStart) {
+      start = arrayStart;
+      openChar = '[';
+      closeChar = ']';
+    } else {
+      start = objectStart;
+    }
 
     let depth = 0;
     let inString = false;
     let escapeNext = false;
 
     for (let i = start; i < text.length; i++) {
-    const char = text[i];
-    if (escapeNext) { escapeNext = false; continue; }
-    if (char === '\\' && inString) { escapeNext = true; continue; }
-    if (char === '"' && !escapeNext) { inString = !inString; continue; }
-    if (inString) continue;
-    if (char === openChar) depth++;
-    else if (char === closeChar) {
-    depth--;
-    if (depth === 0) return text.slice(start, i + 1);
-    }
-    }
-    return null;
-    }
-    }
-
-    // Use non-greedy matching to find first complete JSON object
-    const objectMatch = text.match(/\{[\s\S]*?\}/);
-    if (objectMatch) {
-      try {
-        JSON.parse(objectMatch[0]);
-        return objectMatch[0];
-      } catch {
-        // Not valid JSON
+      const char = text[i];
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (char === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === openChar) depth++;
+      else if (char === closeChar) {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
       }
     }
-
     return null;
   }
 

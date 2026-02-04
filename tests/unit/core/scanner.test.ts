@@ -141,21 +141,22 @@ describe('core/scanner', () => {
 
   describe('hashFile', () => {
     it('should hash file content using md5', () => {
-      vi.mocked(readFileSync).mockReturnValue('file content');
+      // hashFile reads as buffer (no encoding) to handle binary files correctly
+      vi.mocked(readFileSync).mockReturnValue(Buffer.from('file content'));
 
       const hash = hashFile('/project/src/test.ts');
 
-      expect(readFileSync).toHaveBeenCalledWith('/project/src/test.ts', 'utf-8');
+      expect(readFileSync).toHaveBeenCalledWith('/project/src/test.ts');
       // Verify the hash is a valid md5 hex string (32 chars)
       expect(hash).toMatch(/^[a-f0-9]{32}$/);
       // Same content should produce same hash
-      expect(hash).toBe(createHash('md5').update('file content').digest('hex'));
+      expect(hash).toBe(createHash('md5').update(Buffer.from('file content')).digest('hex'));
     });
 
     it('should produce different hashes for different content', () => {
       vi.mocked(readFileSync)
-        .mockReturnValueOnce('content 1')
-        .mockReturnValueOnce('content 2');
+        .mockReturnValueOnce(Buffer.from('content 1'))
+        .mockReturnValueOnce(Buffer.from('content 2'));
 
       const hash1 = hashFile('/project/src/a.ts');
       const hash2 = hashFile('/project/src/b.ts');

@@ -108,9 +108,15 @@ describe('types', () => {
 
   describe('BugCategory', () => {
     it('should accept valid categories', () => {
+      // Security categories
+      expect(BugCategory.parse('injection')).toBe('injection');
+      expect(BugCategory.parse('auth-bypass')).toBe('auth-bypass');
+      expect(BugCategory.parse('secrets-exposure')).toBe('secrets-exposure');
+      // Reliability categories
+      expect(BugCategory.parse('null-reference')).toBe('null-reference');
+      expect(BugCategory.parse('async-issue')).toBe('async-issue');
+      // Correctness categories
       expect(BugCategory.parse('logic-error')).toBe('logic-error');
-      expect(BugCategory.parse('security')).toBe('security');
-      expect(BugCategory.parse('async-race-condition')).toBe('async-race-condition');
     });
   });
 });

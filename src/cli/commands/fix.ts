@@ -7,6 +7,7 @@ import { Bug } from '../../types.js';
 import { loadConfig } from '../../core/config.js';
 import { startFixTUI } from '../../tui/index.js';
 import { applyFix } from '../../core/fixer.js';
+import { loadAccumulatedBugs, removeBugFromAccumulated } from '../../core/bug-merger.js';
 
 interface FixOptions {
   dryRun: boolean;
@@ -90,7 +91,7 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Source 4: Default - whiterose scan results
+  // Source 4: Default - accumulated whiterose scan results
   // ─────────────────────────────────────────────────────────────
 
   // Check if initialized
@@ -106,7 +107,16 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
   // Load config
   const config = await loadConfig(cwd);
 
-  // Find latest scan result
+  // Load accumulated bugs (union of all scans)
+  const accumulatedBugs = loadAccumulatedBugs(cwd);
+
+  if (accumulatedBugs.bugs.length > 0) {
+    p.intro(chalk.red('whiterose') + chalk.dim(' - fixing accumulated bugs'));
+    p.log.info(`Found ${accumulatedBugs.bugs.length} accumulated bugs from all scans`);
+    return await processBugList(accumulatedBugs.bugs, config, options, bugId, cwd);
+  }
+
+  // Fallback to SARIF if no accumulated bugs (legacy support)
   const reportsDir = join(whiterosePath, 'reports');
   if (!existsSync(reportsDir)) {
     p.log.error('No scan results found. Run "whiterose scan" first.');
@@ -137,7 +147,12 @@ export async function fixCommand(bugId: string | undefined, options: FixOptions)
 // ─────────────────────────────────────────────────────────────
 
 function loadBugsFromSarif(sarifPath: string): Bug[] {
-  const sarif = JSON.parse(readFileSync(sarifPath, 'utf-8'));
+  let sarif: any;
+  try {
+    sarif = JSON.parse(readFileSync(sarifPath, 'utf-8'));
+  } catch (error) {
+    throw new Error(`Failed to parse SARIF file: ${sarifPath}. File may be corrupted or malformed.`);
+  }
 
   return sarif.runs?.[0]?.results?.map((r: any, i: number) => {
     // Try to extract full bug info from SARIF properties if available
@@ -170,6 +185,7 @@ function loadBugsFromSarif(sarifPath: string): Bug[] {
       evidence: props.evidence || [],
       suggestedFix: props.suggestedFix,
       createdAt: new Date().toISOString(),
+      status: 'open',
     };
   }) || [];
 }
@@ -210,14 +226,18 @@ async function loadBugFromGitHub(issueUrl: string, cwd: string): Promise<Bug | n
       severity = 'low';
     }
 
-    // Determine category from labels
+    // Determine category from labels (using valid BugCategory values)
     let category: Bug['category'] = 'logic-error';
-    if (labels.some((l: string) => l.includes('security'))) {
-      category = 'security';
+    if (labels.some((l: string) => l.includes('security') || l.includes('injection') || l.includes('xss') || l.includes('sql'))) {
+      category = 'injection';
+    } else if (labels.some((l: string) => l.includes('auth') || l.includes('permission'))) {
+      category = 'auth-bypass';
     } else if (labels.some((l: string) => l.includes('null') || l.includes('undefined'))) {
       category = 'null-reference';
-    } else if (labels.some((l: string) => l.includes('async') || l.includes('race'))) {
-      category = 'async-race-condition';
+    } else if (labels.some((l: string) => l.includes('async') || l.includes('race') || l.includes('promise'))) {
+      category = 'async-issue';
+    } else if (labels.some((l: string) => l.includes('leak') || l.includes('memory'))) {
+      category = 'resource-leak';
     }
 
     return {
@@ -239,6 +259,7 @@ async function loadBugFromGitHub(issueUrl: string, cwd: string): Promise<Bug | n
       codePath: [],
       evidence: [`GitHub issue: ${issueUrl}`],
       createdAt: new Date().toISOString(),
+      status: 'open',
     };
   } catch (error: any) {
     if (error.message?.includes('gh')) {
@@ -309,18 +330,22 @@ async function collectManualBugDescription(cwd: string): Promise<Bug | null> {
 
   if (p.isCancel(severity)) return null;
 
-  // Get category
+  // Get category (using valid BugCategory enum values)
   const category = await p.select({
     message: 'Bug category:',
     options: [
       { value: 'logic-error', label: 'Logic Error' },
       { value: 'null-reference', label: 'Null Reference' },
-      { value: 'security', label: 'Security' },
-      { value: 'async-race-condition', label: 'Async/Race Condition' },
-      { value: 'edge-case', label: 'Edge Case' },
+      { value: 'injection', label: 'Injection (SQL, XSS, etc.)' },
+      { value: 'auth-bypass', label: 'Auth Bypass' },
+      { value: 'async-issue', label: 'Async/Race Condition' },
+      { value: 'boundary-error', label: 'Boundary/Edge Case' },
       { value: 'type-coercion', label: 'Type Coercion' },
+      { value: 'data-validation', label: 'Data Validation' },
       { value: 'resource-leak', label: 'Resource Leak' },
+      { value: 'concurrency', label: 'Concurrency' },
       { value: 'intent-violation', label: 'Intent Violation' },
+      { value: 'secrets-exposure', label: 'Secrets Exposure' },
     ],
     initialValue: 'logic-error',
   });
@@ -349,6 +374,7 @@ async function collectManualBugDescription(cwd: string): Promise<Bug | null> {
     codePath: [],
     evidence: ['Manually reported by user'],
     createdAt: new Date().toISOString(),
+    status: 'open',
   };
 }
 
@@ -360,7 +386,7 @@ function getDefaultConfig() {
     include: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'],
     exclude: ['node_modules', 'dist', 'build'],
     priorities: {},
-    categories: ['logic-error', 'security', 'null-reference'],
+    categories: ['injection', 'auth-bypass', 'secrets-exposure', 'null-reference', 'boundary-error', 'resource-leak', 'async-issue', 'logic-error', 'data-validation', 'type-coercion', 'concurrency', 'intent-violation'],
     minConfidence: 'low' as const,
     staticAnalysis: { typescript: true, eslint: true },
     output: { sarif: true, markdown: true, sarifPath: '.whiterose/reports', markdownPath: 'BUGS.md' },
@@ -375,7 +401,8 @@ async function processBugList(
   bugs: Bug[],
   config: any,
   options: FixOptions,
-  bugId: string | undefined
+  bugId: string | undefined,
+  cwd?: string
 ): Promise<void> {
   if (bugs.length === 0) {
     p.log.success('No bugs to fix!');
@@ -391,12 +418,12 @@ async function processBugList(
       process.exit(1);
     }
 
-    return await fixSingleBug(bug, config, options);
+    return await fixSingleBug(bug, config, options, cwd);
   }
 
-  // Launch interactive TUI
+  // Launch interactive TUI (pass cwd for bug removal after fix)
   try {
-    await startFixTUI(bugs, config, options);
+    await startFixTUI(bugs, config, options, cwd);
   } catch (error: any) {
     // If Ink fails (e.g., not a TTY), fall back to simple mode
     if (error.message?.includes('stdin') || error.message?.includes('TTY')) {
@@ -412,7 +439,7 @@ async function processBugList(
   }
 }
 
-async function fixSingleBug(bug: Bug, config: any, options: FixOptions): Promise<void> {
+async function fixSingleBug(bug: Bug, config: any, options: FixOptions, cwd?: string): Promise<void> {
   p.intro(chalk.red('whiterose') + chalk.dim(' - fixing bug'));
 
   // Check if file is specified (needed for fixing)
@@ -485,6 +512,14 @@ async function fixSingleBug(bug: Bug, config: any, options: FixOptions): Promise
 
       if (result.branchName) {
         p.log.info(`Changes committed to branch: ${result.branchName}`);
+      }
+
+      // Remove bug from accumulated list after successful fix (not dry-run)
+      if (!options.dryRun && cwd) {
+        const removed = removeBugFromAccumulated(cwd, bug.id);
+        if (removed) {
+          p.log.info(`Bug ${bug.id} removed from accumulated bug list`);
+        }
       }
 
       p.outro(chalk.green('Fix complete!'));

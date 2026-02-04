@@ -39,7 +39,13 @@ export async function reportCommand(options: ReportOptions): Promise<void> {
   }
 
   const latestReport = join(reportsDir, reports[0]);
-  const sarif = JSON.parse(readFileSync(latestReport, 'utf-8'));
+  let sarif: any;
+  try {
+    sarif = JSON.parse(readFileSync(latestReport, 'utf-8'));
+  } catch (error) {
+    p.log.error(`Failed to parse SARIF report: ${latestReport}`);
+    process.exit(1);
+  }
 
   // Convert SARIF to ScanResult
   const bugs: Bug[] = sarif.runs?.[0]?.results?.map((r: any, i: number) => ({
@@ -48,12 +54,13 @@ export async function reportCommand(options: ReportOptions): Promise<void> {
     description: r.message?.markdown || r.message?.text || '',
     file: r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'unknown',
     line: r.locations?.[0]?.physicalLocation?.region?.startLine || 0,
-    severity: r.level === 'error' ? 'critical' : r.level === 'warning' ? 'high' : 'medium',
+    severity: r.level === 'error' ? 'high' : r.level === 'warning' ? 'medium' : 'low',
     category: 'logic-error',
     confidence: { overall: 'high', codePathValidity: 0.9, reachability: 0.9, intentViolation: false, staticToolSignal: false, adversarialSurvived: true },
     codePath: [],
     evidence: [],
     createdAt: new Date().toISOString(),
+    status: 'open',
   })) || [];
 
   const result: ScanResult = {

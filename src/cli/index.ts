@@ -2,16 +2,16 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import * as p from '@clack/prompts';
 import { existsSync } from 'fs';
-import { join, resolve, basename } from 'path';
+import { join, basename } from 'path';
 import { initCommand } from './commands/init.js';
 import { scanCommand } from './commands/scan.js';
 import { fixCommand } from './commands/fix.js';
 import { refreshCommand } from './commands/refresh.js';
 import { statusCommand } from './commands/status.js';
 import { reportCommand } from './commands/report.js';
+import { clearCommand } from './commands/clear.js';
 import { detectProvider } from '../providers/detect.js';
 import { ProviderType } from '../types.js';
-import { pathInput } from './utils/path-input.js';
 
 const BANNER = `
 ${chalk.red('██╗    ██╗██╗  ██╗██╗████████╗███████╗██████╗  ██████╗ ███████╗███████╗')}
@@ -29,7 +29,7 @@ const program = new Command();
 program
   .name('whiterose')
   .description('AI-powered bug hunter that uses your existing LLM subscription')
-  .version('0.2.1')
+  .version('0.2.7')
   .hook('preAction', () => {
     // Show banner only for main commands, not help
     const args = process.argv.slice(2);
@@ -43,11 +43,11 @@ program
 // ─────────────────────────────────────────────────────────────
 program
   .command('init')
-  .description('Initialize whiterose for this project (scans codebase, asks questions, generates config)')
+  .description('Initialize whiterose for this project (scans codebase, generates config)')
   .option('-p, --provider <provider>', 'LLM provider to use', 'claude-code')
-  .option('--skip-questions', 'Skip interactive questions, use defaults')
   .option('--force', 'Overwrite existing .whiterose directory')
-  .option('--unsafe', 'Bypass LLM permission prompts (use with caution)')
+  .option('--ci', 'CI mode: non-interactive, use defaults (same as --skip-questions)')
+  .option('--skip-questions', 'Skip interactive questions, use defaults')
   .action(initCommand);
 
 // ─────────────────────────────────────────────────────────────
@@ -55,15 +55,15 @@ program
 // ─────────────────────────────────────────────────────────────
 program
   .command('scan [paths...]')
-  .description('Scan for bugs in the codebase')
+  .description('Scan for bugs in the codebase (includes inline validation)')
   .option('-f, --full', 'Force full scan (ignore cache)')
   .option('--json', 'Output as JSON only')
   .option('--sarif', 'Output as SARIF only')
   .option('-p, --provider <provider>', 'Override LLM provider')
   .option('-c, --category <categories...>', 'Filter by bug categories')
   .option('--min-confidence <level>', 'Minimum confidence level to report', 'low')
-  .option('--no-adversarial', 'Skip adversarial validation (faster, less accurate)')
-  .option('--unsafe', 'Bypass LLM permission prompts (use with caution)')
+  .option('--ci', 'CI mode: non-interactive, exit code 1 if bugs found (for CI/CD and git hooks)')
+  .option('--quick', 'Quick scan: fast parallel analysis without init (for pre-commit hooks)')
   .action(scanCommand);
 
 // ─────────────────────────────────────────────────────────────
@@ -77,6 +77,7 @@ program
   .option('--sarif <path>', 'Load bugs from an external SARIF file')
   .option('--github <url>', 'Load bug from a GitHub issue URL')
   .option('--describe', 'Manually describe a bug to fix')
+  .option('--unsafe', 'Skip all permission prompts (full trust mode)')
   .action(fixCommand);
 
 // ─────────────────────────────────────────────────────────────
@@ -107,66 +108,88 @@ program
   .action(reportCommand);
 
 // ─────────────────────────────────────────────────────────────
-// Interactive wizard when no command provided
+// clear - Clear accumulated bugs
 // ─────────────────────────────────────────────────────────────
-async function showInteractiveWizard(): Promise<void> {
+program
+  .command('clear')
+  .description('Clear accumulated bug list (start fresh)')
+  .option('--force', 'Skip confirmation prompt')
+  .action(clearCommand);
+
+// ─────────────────────────────────────────────────────────────
+// Auto-run: Minimal questions, maximum action
+// ─────────────────────────────────────────────────────────────
+async function autoRun(): Promise<void> {
   console.log(BANNER);
 
   p.intro(chalk.red('whiterose') + chalk.dim(' - AI Bug Hunter'));
 
-  // ─────────────────────────────────────────────────────────────
-  // Step 1: Repository path (with Tab completion)
-  // ─────────────────────────────────────────────────────────────
+  // Check if current directory looks like a project
   const cwd = process.cwd();
-  const defaultPath = cwd;
+  const looksLikeProject = existsSync(join(cwd, 'package.json')) ||
+                           existsSync(join(cwd, 'go.mod')) ||
+                           existsSync(join(cwd, 'Cargo.toml')) ||
+                           existsSync(join(cwd, 'requirements.txt')) ||
+                           existsSync(join(cwd, 'pyproject.toml')) ||
+                           existsSync(join(cwd, '.git')) ||
+                           existsSync(join(cwd, 'src'));
 
-  const repoPath = await pathInput({
-    message: 'Repository path',
-    defaultValue: defaultPath,
-    validate: (value) => {
-      const path = value || defaultPath;
-      if (!existsSync(path)) {
-        return 'Directory does not exist';
-      }
-      return undefined;
-    },
-  });
+  let targetPath = cwd;
 
-  if (repoPath === null) {
-    p.cancel('Cancelled.');
-    process.exit(0);
+  // If current dir doesn't look like a project, ask for path
+  if (!looksLikeProject) {
+    const { pathInput } = await import('./utils/path-input.js');
+    const inputPath = await pathInput({
+      message: 'Enter project path',
+      defaultValue: cwd,
+      validate: (value) => {
+        const path = value || cwd;
+        if (!existsSync(path)) {
+          return 'Directory does not exist';
+        }
+        return undefined;
+      },
+    });
+
+    if (inputPath === null) {
+      p.cancel('Cancelled.');
+      process.exit(0);
+    }
+
+    targetPath = inputPath || cwd;
+    process.chdir(targetPath);
   }
 
-  const targetPath = resolve(repoPath || defaultPath);
   const projectName = basename(targetPath);
   const whiterosePath = join(targetPath, '.whiterose');
   const isInitialized = existsSync(whiterosePath);
 
   // ─────────────────────────────────────────────────────────────
-  // Step 2: Detect and select LLM provider
+  // Detect and select provider
   // ─────────────────────────────────────────────────────────────
   const detectSpinner = p.spinner();
   detectSpinner.start('Detecting LLM providers...');
 
   const availableProviders = await detectProvider();
-  detectSpinner.stop(`Found ${availableProviders.length} provider(s)`);
 
   if (availableProviders.length === 0) {
+    detectSpinner.stop('No providers found');
     p.log.error('No LLM providers detected on your system.');
     console.log();
-    console.log(chalk.dim('  Supported providers:'));
+    console.log(chalk.dim('  Install one of:'));
     console.log(chalk.dim('  - claude-code: ') + chalk.cyan('npm install -g @anthropic-ai/claude-code'));
     console.log(chalk.dim('  - aider: ') + chalk.cyan('pip install aider-chat'));
     console.log();
-    p.outro(chalk.red('Install a provider and try again.'));
     process.exit(1);
   }
+
+  detectSpinner.stop(`Found ${availableProviders.length} provider(s)`);
 
   let selectedProvider: ProviderType;
 
   if (availableProviders.length === 1) {
     selectedProvider = availableProviders[0];
-    p.log.info(`Using ${chalk.cyan(selectedProvider)} (only available provider)`);
+    p.log.info(`Using ${chalk.cyan(selectedProvider)}`);
   } else {
     const providerChoice = await p.select({
       message: 'Select LLM provider',
@@ -186,104 +209,42 @@ async function showInteractiveWizard(): Promise<void> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Step 3: Ask about LLM permission prompts
-  // ─────────────────────────────────────────────────────────────
-  const bypassPrompts = await p.confirm({
-    message: 'Bypass LLM permission prompts? (recommended for smoother experience)',
-    initialValue: true,
-  });
-
-  if (p.isCancel(bypassPrompts)) {
-    p.cancel('Cancelled.');
-    process.exit(0);
-  }
-
-  const unsafeMode = bypassPrompts === true;
-
-  if (!unsafeMode) {
-    p.log.info(chalk.dim('You may need to accept prompts in the LLM CLI during analysis.'));
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Step 4: Initialize if needed
+  // Auto-initialize if needed
   // ─────────────────────────────────────────────────────────────
   if (!isInitialized) {
-    p.log.warn(`Project "${projectName}" is not initialized.`);
-
-    const shouldInit = await p.confirm({
-      message: 'Initialize whiterose for this project?',
-      initialValue: true,
-    });
-
-    if (p.isCancel(shouldInit) || !shouldInit) {
-      p.cancel('Cannot scan without initialization.');
-      process.exit(0);
-    }
-
-    // Change to target directory for init
-    process.chdir(targetPath);
+    p.log.step(`Initializing whiterose for "${projectName}"...`);
+    console.log();
 
     await initCommand({
       provider: selectedProvider,
-      skipQuestions: false,
+      skipQuestions: true, // No questions, use defaults
       force: false,
-      unsafe: unsafeMode,
-      skipProviderDetection: true, // Already verified in wizard
+      unsafe: false,
+      skipProviderDetection: true,
     });
 
-    console.log(); // spacing after init
-  } else {
-    // Change to target directory
-    process.chdir(targetPath);
+    console.log();
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Step 5: Scan depth
+  // Start bug hunting
   // ─────────────────────────────────────────────────────────────
-  const scanDepth = await p.select({
-    message: 'Scan depth',
-    options: [
-      {
-        value: 'quick',
-        label: 'Quick scan',
-        hint: 'faster, incremental changes only',
-      },
-      {
-        value: 'deep',
-        label: 'Deep scan',
-        hint: 'thorough, full codebase analysis (recommended)',
-      },
-    ],
-    initialValue: 'deep',
-  });
-
-  if (p.isCancel(scanDepth)) {
-    p.cancel('Cancelled.');
-    process.exit(0);
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // Step 6: Start scan
-  // ─────────────────────────────────────────────────────────────
-  console.log();
-  p.log.step('Starting scan...');
+  p.log.step('Starting bug hunt...');
   console.log();
 
   await scanCommand([], {
-    full: scanDepth === 'deep',
+    full: true,
     json: false,
     sarif: false,
     provider: selectedProvider,
     category: undefined,
     minConfidence: 'low',
-    adversarial: true,
-    unsafe: unsafeMode,
   });
 }
 
-// Show interactive wizard when no command provided
+// Auto-run when no command provided
 if (process.argv.length === 2) {
-  showInteractiveWizard().catch((error) => {
+  autoRun().catch((error) => {
     console.error(chalk.red('Error:'), error.message);
     process.exit(1);
   });

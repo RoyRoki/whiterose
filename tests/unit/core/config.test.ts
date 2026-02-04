@@ -70,18 +70,20 @@ provider: claude-code
     it('should load understanding from JSON file', async () => {
       vi.mocked(existsSync).mockReturnValue(true);
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        version: '1',
+        generatedAt: '2024-01-01T00:00:00Z',
         summary: {
           type: 'web-app',
           description: 'Test app',
           language: 'typescript',
         },
         structure: {
-          entryPoints: ['src/index.ts'],
           totalFiles: 10,
+          totalLines: 1000,
         },
         features: [],
         contracts: [],
-        createdAt: '2024-01-01T00:00:00Z',
+        dependencies: {},
       }));
 
       const understanding = await loadUnderstanding('/test/project');

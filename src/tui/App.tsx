@@ -90,18 +90,26 @@ export const App: React.FC<AppProps> = ({ bugs, config, fixOptions, onFix, onExi
     setState((s) => ({ ...s, screen: 'fix' }));
   };
 
+  const [fixError, setFixError] = useState<string | null>(null);
+
   const handleConfirmFix = async () => {
     if (selectedBug) {
-      await onFix(selectedBug);
-      // Move to next bug or back to list
-      if (state.selectedBugIndex < filteredBugs.length - 1) {
-        setState((s) => ({
-          ...s,
-          screen: 'detail',
-          selectedBugIndex: s.selectedBugIndex + 1,
-        }));
-      } else {
-        setState((s) => ({ ...s, screen: 'list' }));
+      try {
+        setFixError(null);
+        await onFix(selectedBug);
+        // Move to next bug or back to list
+        if (state.selectedBugIndex < filteredBugs.length - 1) {
+          setState((s) => ({
+            ...s,
+            screen: 'detail',
+            selectedBugIndex: s.selectedBugIndex + 1,
+          }));
+        } else {
+          setState((s) => ({ ...s, screen: 'list' }));
+        }
+      } catch (error: any) {
+        setFixError(error.message || 'Fix failed');
+        setState((s) => ({ ...s, screen: 'detail' }));
       }
     }
   };
@@ -152,25 +160,32 @@ export const App: React.FC<AppProps> = ({ bugs, config, fixOptions, onFix, onExi
       )}
 
       {state.screen === 'detail' && selectedBug && (
-        <BugDetail
-          bug={selectedBug}
-          index={state.selectedBugIndex}
-          total={filteredBugs.length}
-          onFix={handleStartFix}
-          onNext={() =>
-            setState((s) => ({
-              ...s,
-              selectedBugIndex: Math.min(s.selectedBugIndex + 1, filteredBugs.length - 1),
-            }))
-          }
-          onPrev={() =>
-            setState((s) => ({
-              ...s,
-              selectedBugIndex: Math.max(s.selectedBugIndex - 1, 0),
-            }))
-          }
-          onBack={handleBack}
-        />
+        <>
+          {fixError && (
+            <Box marginBottom={1}>
+              <Text color="red">Fix error: {fixError}</Text>
+            </Box>
+          )}
+          <BugDetail
+            bug={selectedBug}
+            index={state.selectedBugIndex}
+            total={filteredBugs.length}
+            onFix={handleStartFix}
+            onNext={() =>
+              setState((s) => ({
+                ...s,
+                selectedBugIndex: Math.min(s.selectedBugIndex + 1, filteredBugs.length - 1),
+              }))
+            }
+            onPrev={() =>
+              setState((s) => ({
+                ...s,
+                selectedBugIndex: Math.max(s.selectedBugIndex - 1, 0),
+              }))
+            }
+            onBack={handleBack}
+          />
+        </>
       )}
 
       {state.screen === 'fix' && selectedBug && (

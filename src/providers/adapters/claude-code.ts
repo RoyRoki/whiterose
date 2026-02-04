@@ -8,6 +8,7 @@ import {
   Bug,
   AdversarialResult,
   CodebaseUnderstanding,
+  StaticAnalysisResult,
 } from '../../types.js';
 import { isProviderAvailable, getProviderCommand } from '../detect.js';
 import { generateBugId } from '../../core/utils.js';
@@ -17,6 +18,20 @@ import {
   PartialUnderstandingFromLLM,
   AdversarialResultSchema,
 } from '../../core/validation.js';
+import {
+  buildThoroughScanPrompt,
+  buildUnderstandingPrompt,
+  buildAdversarialPrompt,
+  buildOptimizedQuickScanPrompt,
+} from '../prompts/index.js';
+import {
+  prepareOptimizedScan,
+  TIER_CONFIGS,
+  cacheResults,
+  checkCache,
+  type ScanTier,
+} from '../../core/optimized-scanner.js';
+import { loadCache, saveCache } from '../../core/analysis-cache.js';
 
 // Callback for streaming progress updates
 type ProgressCallback = (message: string) => void;
@@ -88,20 +103,270 @@ export class ClaudeCodeProvider implements LLMProvider {
     }
   }
 
-  async analyze(context: AnalysisContext): Promise<Bug[]> {
-    const { files, understanding } = context;
+  async analyze(context: AnalysisContext, options?: { quick?: boolean }): Promise<Bug[]> {
+    const { files, understanding, staticAnalysisResults } = context;
 
     if (files.length === 0) {
       return [];
     }
 
+    // Quick scan: parallel single-file analysis (for pre-commit hooks)
+    if (options?.quick) {
+      return this.quickScan(files, understanding, staticAnalysisResults || []);
+    }
+
+    // Thorough scan: agentic exploration (for full audits)
+    return this.thoroughScan(files, understanding, staticAnalysisResults || []);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Quick Scan - Optimized AST-based analysis with caching
+  // ─────────────────────────────────────────────────────────────
+  private async quickScan(
+    files: string[],
+    understanding: CodebaseUnderstanding,
+    staticResults: Array<{ tool: string; file: string; line: number; message: string; severity: string }>
+  ): Promise<Bug[]> {
+    const cwd = process.cwd();
+    const tier: ScanTier = 'instant';
+    const config = TIER_CONFIGS[tier];
+
+    this.reportProgress(`Quick scan: preparing optimized analysis...`);
+
+    // Convert to StaticAnalysisResult format (cast tool and severity to expected literals)
+    const typedStaticResults: StaticAnalysisResult[] = staticResults.map(r => ({
+      tool: r.tool as 'typescript' | 'eslint',
+      file: r.file,
+      line: r.line,
+      message: r.message,
+      severity: r.severity as 'error' | 'warning' | 'info',
+    }));
+
+    // Prepare optimized scan with AST extraction
+    const scanResult = await prepareOptimizedScan(
+      cwd,
+      tier,
+      understanding,
+      typedStaticResults,
+      files
+    );
+
+    // Report cache stats
+    if (scanResult.cacheStats.hits > 0) {
+      this.reportProgress(
+        `Cache: ${scanResult.cacheStats.hits} hits, ${scanResult.cacheStats.misses} to analyze`
+      );
+    }
+
+    // If everything is cached, we're done
+    if (scanResult.cacheStats.misses === 0 && scanResult.targets.length === 0) {
+      this.reportProgress(`Quick scan: all functions cached, no analysis needed`);
+      return [];
+    }
+
+    this.reportProgress(
+      `Quick scan: ${scanResult.targets.length} files, ${scanResult.cacheStats.misses} functions to analyze`
+    );
+
+    // Group static findings by file
+    const staticByFile = new Map<string, Array<{ line: number; tool: string; message: string }>>();
+    for (const result of staticResults) {
+      const existing = staticByFile.get(result.file) || [];
+      existing.push({ line: result.line, tool: result.tool, message: result.message });
+      staticByFile.set(result.file, existing);
+    }
+
+    // Load cache for checking and storing
+    const cache = loadCache(cwd);
+    const bugs: Bug[] = [];
+    let bugIndex = 0;
+    let completed = 0;
+
+    // Process files in parallel batches
+    const BATCH_SIZE = config.parallelFiles;
+    const targets = scanResult.targets;
+
+    for (let i = 0; i < targets.length; i += BATCH_SIZE) {
+      const batch = targets.slice(i, i + BATCH_SIZE);
+
+      const batchResults = await Promise.all(
+        batch.map(async (target) => {
+          const context = scanResult.contexts.get(target.filePath);
+          if (!context || context.changedUnits.length === 0) {
+            completed++;
+            return [];
+          }
+
+          // Check cache for each unit
+          const { cachedBugs, uncachedUnits } = checkCache(
+            cache,
+            context.changedUnits,
+            target.filePath
+          );
+
+          // If all units are cached, return cached bugs
+          if (uncachedUnits.length === 0) {
+            completed++;
+            this.reportProgress(`Quick scan: ${completed}/${targets.length} (cached)`);
+            return cachedBugs;
+          }
+
+          try {
+            // Build optimized prompt with extracted functions
+            const staticFindings = staticByFile.get(target.filePath) || [];
+            const fileBugs = await this.analyzeOptimizedFile(
+              target.filePath,
+              context,
+              understanding,
+              staticFindings
+            );
+
+            // Cache the results
+            cacheResults(cache, target.filePath, uncachedUnits, fileBugs);
+
+            completed++;
+            this.reportProgress(`Quick scan: ${completed}/${targets.length} files`);
+
+            return [...cachedBugs, ...fileBugs];
+          } catch (error) {
+            completed++;
+            this.reportProgress(`Quick scan: ${completed}/${targets.length} (error)`);
+            return cachedBugs; // Return at least cached bugs on error
+          }
+        })
+      );
+
+      // Collect bugs from batch
+      for (const fileBugs of batchResults) {
+        for (const bugData of fileBugs) {
+          // If already a Bug object (from cache), use it directly
+          if (bugData.id && bugData.title && bugData.file) {
+            bugs.push(bugData as Bug);
+            this.reportBug(bugData as Bug);
+          } else {
+            // Parse from LLM response
+            const bug = this.parseBugData(JSON.stringify(bugData), bugIndex++, files);
+            if (bug) {
+              bugs.push(bug);
+              this.reportBug(bug);
+            }
+          }
+        }
+      }
+    }
+
+    // Save cache
+    saveCache(cwd, cache);
+
+    // PASS 2: Generate fixes for bugs without suggestedFix
+    const bugsWithoutFix = bugs.filter(b => !b.suggestedFix || b.suggestedFix.trim() === '');
+    if (bugsWithoutFix.length > 0) {
+      this.reportProgress(`Generating fixes for ${bugsWithoutFix.length} bugs...`);
+
+      for (const bug of bugsWithoutFix) {
+        try {
+          const fix = await this.generateFixForBug(bug, cwd);
+          if (fix) {
+            bug.suggestedFix = fix;
+          }
+        } catch {
+          // Continue even if fix generation fails
+        }
+      }
+    }
+
+    this.reportProgress(`Quick scan complete. Found ${bugs.length} bugs.`);
+    return bugs;
+  }
+
+  // Analyze a file using optimized AST-extracted context
+  private async analyzeOptimizedFile(
+    filePath: string,
+    context: { changedUnits: Array<{ name: string; type: string; code: string; signature?: string; startLine: number; endLine: number; hash: string; calls: string[]; references: string[] }>; calleeSignatures: string[]; referencedTypes: Array<{ name: string; kind: string; code: string }>; relevantImports: Array<{ source: string; specifiers: string[] }>; estimatedTokens: number },
+    understanding: CodebaseUnderstanding,
+    staticFindings: Array<{ line: number; tool: string; message: string }>
+  ): Promise<any[]> {
+    // Skip if no functions to analyze
+    if (context.changedUnits.length === 0) {
+      return [];
+    }
+
+    // Convert OptimizedContext to prompt format
+    const changedFunctions = context.changedUnits.map(u => ({
+      name: u.name,
+      type: u.type,
+      code: u.code,
+      signature: u.signature,
+      startLine: u.startLine,
+      endLine: u.endLine,
+    }));
+
+    // Build supporting context from callee signatures
+    const supportingContext = context.calleeSignatures.map((sig, i) => ({
+      name: `callee_${i}`,
+      type: 'signature',
+      code: sig,
+      startLine: 0,
+      endLine: 0,
+    }));
+
+    const typeDefinitions = context.referencedTypes.map(t => t.code);
+    const imports = context.relevantImports.map(i =>
+      `import { ${i.specifiers.join(', ')} } from '${i.source}'`
+    );
+
+    const prompt = buildOptimizedQuickScanPrompt({
+      filePath,
+      projectType: understanding.summary.type,
+      framework: understanding.summary.framework || '',
+      language: understanding.summary.language,
+      changedFunctions,
+      supportingContext,
+      typeDefinitions,
+      imports,
+      staticFindings: staticFindings.length > 0 ? staticFindings : undefined,
+      estimatedTokens: context.estimatedTokens,
+    });
+
+    try {
+      const result = await this.runSimpleClaude(prompt, process.cwd());
+      return this.parseQuickAnalysisResult(result, filePath);
+    } catch {
+      return [];
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Thorough Scan - Agentic exploration (slow, for full audits)
+  // ─────────────────────────────────────────────────────────────
+  private async thoroughScan(
+    files: string[],
+    understanding: CodebaseUnderstanding,
+    staticResults: Array<{ tool: string; file: string; line: number; message: string; severity: string }>
+  ): Promise<Bug[]> {
     const cwd = process.cwd();
     const bugs: Bug[] = [];
     let bugIndex = 0;
 
-    const prompt = this.buildAgenticAnalysisPrompt(understanding);
+    // Convert static analysis results to the format expected by the prompt
+    const staticFindings = staticResults.map(r => ({
+      tool: r.tool,
+      file: r.file,
+      line: r.line,
+      message: r.message,
+      severity: r.severity,
+    }));
 
-    this.reportProgress('Starting agentic analysis...');
+    const prompt = buildThoroughScanPrompt({
+      projectType: understanding.summary.type,
+      framework: understanding.summary.framework || '',
+      language: understanding.summary.language,
+      description: understanding.summary.description,
+      totalLOC: understanding.structure.totalLines,
+      staticAnalysisFindings: staticFindings.length > 0 ? staticFindings : undefined,
+    });
+
+    this.reportProgress('Starting thorough analysis (agentic mode)...');
 
     try {
       await this.runAgenticClaude(prompt, cwd, {
@@ -130,7 +395,89 @@ export class ClaudeCodeProvider implements LLMProvider {
       throw error;
     }
 
+    // PASS 2: Generate fixes for bugs without suggestedFix
+    const bugsWithoutFix = bugs.filter(b => !b.suggestedFix || b.suggestedFix.trim() === '');
+    if (bugsWithoutFix.length > 0) {
+      this.reportProgress(`Generating fixes for ${bugsWithoutFix.length} bugs without suggested fixes...`);
+
+      for (const bug of bugsWithoutFix) {
+        try {
+          this.reportProgress(`Generating fix for: ${bug.title}`);
+          const fix = await this.generateFixForBug(bug, cwd);
+          if (fix) {
+            bug.suggestedFix = fix;
+            this.reportProgress(`Generated fix for: ${bug.title}`);
+          }
+        } catch (error) {
+          // Continue even if fix generation fails
+          this.reportProgress(`Could not generate fix for: ${bug.title}`);
+        }
+      }
+    }
+
     return bugs;
+  }
+
+  // Generate a fix for a bug that doesn't have one
+  private async generateFixForBug(bug: Bug, cwd: string): Promise<string | undefined> {
+    // Read the file containing the bug
+    let fileContent = '';
+    try {
+      if (existsSync(bug.file)) {
+        fileContent = readFileSync(bug.file, 'utf-8');
+        const lines = fileContent.split('\n');
+        const start = Math.max(0, bug.line - 15);
+        const end = Math.min(lines.length, (bug.endLine || bug.line) + 15);
+        fileContent = lines.slice(start, end).join('\n');
+      }
+    } catch {
+      // Continue without file content
+    }
+
+    const prompt = `You are a senior developer fixing a specific bug. Generate ONLY the fix code.
+
+BUG DETAILS:
+- Title: ${bug.title}
+- Description: ${bug.description}
+- File: ${bug.file}
+- Line: ${bug.line}${bug.endLine ? ` to ${bug.endLine}` : ''}
+- Category: ${bug.category}
+- Severity: ${bug.severity}
+
+CODE CONTEXT (lines ${Math.max(0, bug.line - 15)}-${(bug.endLine || bug.line) + 15}):
+\`\`\`
+${fileContent}
+\`\`\`
+
+${bug.codePath.length > 0 ? `CODE PATH:
+${bug.codePath.map(s => `- ${s.file}:${s.line}: ${s.explanation}`).join('\n')}` : ''}
+
+${bug.evidence.length > 0 ? `EVIDENCE:
+${bug.evidence.map(e => `- ${e}`).join('\n')}` : ''}
+
+TASK: Write the EXACT code fix. Output ONLY the fixed code that should replace the buggy code.
+- Do NOT include explanations or markdown
+- Do NOT include the entire file, only the fix
+- The fix should be minimal and focused
+- Output raw code that can be directly applied
+
+FIX:`;
+
+    try {
+      const result = await this.runSimpleClaude(prompt, cwd);
+      // Clean up the response - remove markdown code blocks if present
+      let fix = result.trim();
+      if (fix.startsWith('```')) {
+        fix = fix.replace(/^```\w*\n?/, '').replace(/\n?```$/, '');
+      }
+      // Only return if it looks like actual code (not just explanation)
+      if (fix.length > 0 && fix.length < 5000 && !fix.toLowerCase().startsWith('the fix')) {
+        return fix;
+      }
+    } catch {
+      // Silently fail
+    }
+    return undefined;
   }
 
   async adversarialValidate(bug: Bug, _context: AnalysisContext): Promise<AdversarialResult> {
@@ -148,7 +495,15 @@ export class ClaudeCodeProvider implements LLMProvider {
       // File read failed, continue without content
     }
 
-    const prompt = this.buildAdversarialPrompt(bug, fileContent);
+    const prompt = buildAdversarialPrompt({
+      file: bug.file,
+      line: bug.line,
+      title: bug.title,
+      description: bug.description,
+      category: bug.category,
+      severity: bug.severity,
+      fileContent,
+    });
     const result = await this.runSimpleClaude(prompt, process.cwd());
 
     return this.parseAdversarialResponse(result, bug);
@@ -159,7 +514,7 @@ export class ClaudeCodeProvider implements LLMProvider {
 
     this.reportProgress(`Starting codebase analysis (${files.length} files)...`);
 
-    const prompt = this.buildAgenticUnderstandingPrompt(existingDocsSummary);
+    const prompt = buildUnderstandingPrompt({ existingDocsSummary });
     let understandingJson = '';
 
     try {
@@ -187,112 +542,68 @@ export class ClaudeCodeProvider implements LLMProvider {
     }
   }
 
+
   // ─────────────────────────────────────────────────────────────
-  // Agentic Prompts
+  // JSON Extraction Helpers
   // ─────────────────────────────────────────────────────────────
 
-  private buildAgenticAnalysisPrompt(understanding: CodebaseUnderstanding): string {
-    return `You are whiterose, an expert bug hunter. Your task is to explore this codebase and find real bugs.
+  /**
+   * Extract JSON from <json></json> tags (primary method)
+   * Falls back to finding balanced JSON if tags not present
+   */
+  private extractJsonFromTags(response: string): string | null {
+    // Primary: Try <json></json> tags
+    const tagMatch = response.match(/<json>([\s\S]*?)<\/json>/);
+    if (tagMatch) {
+      return tagMatch[1].trim();
+    }
 
-CODEBASE CONTEXT:
-- Type: ${understanding.summary.type}
-- Framework: ${understanding.summary.framework || 'Unknown'}
-- Description: ${understanding.summary.description}
+    // Fallback: Try markdown code blocks
+    const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlockMatch) {
+      return codeBlockMatch[1].trim();
+    }
 
-YOUR TASK:
-1. Explore the codebase by reading files
-2. Look for bugs in these categories:
-   - Logic errors (off-by-one, wrong operators, incorrect conditions)
-   - Null/undefined dereference
-   - Security vulnerabilities (injection, auth bypass, XSS)
-   - Async/race conditions (missing await, unhandled promises)
-   - Edge cases (empty arrays, zero values, boundaries)
-   - Resource leaks (unclosed connections)
-
-PROTOCOL - You MUST output these markers:
-- Before reading each file, output: ${MARKERS.SCANNING}<filepath>
-- When you find a bug, output: ${MARKERS.BUG}<json>
-- When completely done, output: ${MARKERS.COMPLETE}
-- If you encounter an error, output: ${MARKERS.ERROR}<message>
-
-BUG JSON FORMAT:
-${MARKERS.BUG}{"file":"src/api/users.ts","line":42,"title":"Null dereference in getUserById","description":"...","severity":"high","category":"null-reference","evidence":["..."],"suggestedFix":"..."}
-
-IMPORTANT:
-- Only report bugs you have HIGH confidence in
-- Include exact line numbers
-- Focus on real bugs, not style issues
-- Explore systematically - check API routes, data handling, auth flows
-
-Now explore this codebase and find bugs. Start by reading the main entry points.`;
+    // Last resort: Find balanced JSON
+    return this.findBalancedJson(response);
   }
 
-  private buildAgenticUnderstandingPrompt(existingDocsSummary?: string): string {
-    const docsSection = existingDocsSummary
-      ? `\n\nEXISTING DOCUMENTATION (merge this with your exploration):\n${existingDocsSummary}\n`
-      : '';
+  /**
+   * Parse quick scan result - handles new <json></json> format
+   */
+  private parseQuickAnalysisResult(result: string, filePath: string): any[] {
+    try {
+      const jsonStr = this.extractJsonFromTags(result);
+      if (!jsonStr) {
+        return [];
+      }
 
-    return `You are whiterose. Your task is to understand this codebase.
-${docsSection}
-YOUR TASK:
-1. Review the existing documentation above (if any)
-2. Explore the codebase structure to fill in gaps
-3. Read key files (main entry points, config files, core modules)
-4. Build a comprehensive understanding merging docs + code exploration
-5. Identify main features, business rules, and behavioral contracts
+      const parsed = JSON.parse(jsonStr);
 
-PROTOCOL - You MUST output these markers:
-- Before reading each file, output: ${MARKERS.SCANNING}<filepath>
-- When you have full understanding, output: ${MARKERS.UNDERSTANDING}<json>
-- When completely done, output: ${MARKERS.COMPLETE}
+      // New format: { bugs: [], needsReview: [] }
+      if (parsed.bugs && Array.isArray(parsed.bugs)) {
+        const allBugs = [
+          ...parsed.bugs.map((bug: any) => ({ ...bug, file: filePath })),
+          // Also include needsReview items as low-confidence bugs
+          ...(parsed.needsReview || []).map((item: any) => ({
+            ...item,
+            file: filePath,
+            confidence: 'low',
+            severity: item.severity || 'low',
+          })),
+        ];
+        return allBugs;
+      }
 
-UNDERSTANDING JSON FORMAT:
-${MARKERS.UNDERSTANDING}{
-  "summary": {
-    "type": "api|web-app|cli|library|etc",
-    "framework": "next.js|express|react|etc",
-    "language": "typescript|javascript",
-    "description": "2-3 sentence description"
-  },
-  "features": [
-    {"name": "Feature", "description": "What it does", "priority": "critical|high|medium|low", "constraints": ["business rule 1", "invariant 2"], "relatedFiles": ["path/to/file.ts"]}
-  ],
-  "contracts": [
-    {"function": "functionName", "file": "path/to/file.ts", "inputs": [], "outputs": {}, "invariants": ["must do X before Y"], "sideEffects": [], "throws": []}
-  ]
-}
+      // Legacy format: array of bugs directly
+      if (Array.isArray(parsed)) {
+        return parsed.map(bug => ({ ...bug, file: filePath }));
+      }
 
-IMPORTANT:
-- Merge existing documentation with what you discover in the code
-- Focus on business rules and invariants (what MUST be true)
-- Identify critical paths (checkout, auth, payments, etc.)
-- Document behavioral contracts for important functions
-
-Now explore this codebase and build understanding.`;
-  }
-
-  private buildAdversarialPrompt(bug: Bug, fileContent: string): string {
-    return `You are a skeptical code reviewer. Try to DISPROVE this bug report.
-
-REPORTED BUG:
-- File: ${bug.file}:${bug.line}
-- Title: ${bug.title}
-- Description: ${bug.description}
-- Severity: ${bug.severity}
-
-CODE CONTEXT:
-${fileContent}
-
-Try to prove this is NOT a bug by finding:
-1. Guards or validation that prevents this
-2. Type system guarantees
-3. Framework behavior that handles this
-4. Unreachable code paths
-
-OUTPUT AS JSON:
-{"survived": true/false, "counterArguments": ["reason 1"], "confidence": "high/medium/low", "explanation": "..."}
-
-Set "survived": true if you CANNOT disprove it (it's a real bug).`;
+      return [];
+    } catch {
+      return [];
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -310,6 +621,10 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
       onError?: (error: string) => void;
     }
   ): Promise<void> {
+    // Reset buffers at start of each run
+    this.streamBuffer = '';
+    this.fullResponseBuffer = '';
+
     const claudeCommand = getProviderCommand('claude-code');
 
     // Build command arguments with proper streaming output format
@@ -319,10 +634,12 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
       '--verbose',
     ];
 
-    // Auto-approve tools when unsafe mode is enabled
-    if (this.unsafeMode) {
-      args.push('--allowedTools', 'Bash,Read,Edit,Glob,Grep,Write');
-    }
+    // Always auto-approve for read-only operations (init/scan)
+    // Write operations (fix) will use interactive mode separately
+    args.push('--dangerously-skip-permissions');
+
+    // Log start without dumping the prompt
+    this.reportProgress(`Starting Claude analysis...`);
 
     // Use native spawn for proper streaming (execa v9 has buffering issues)
     this.currentProcess = spawn(claudeCommand, args, {
@@ -334,12 +651,17 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // Track if we've received ANY output
+    let receivedOutput = false;
+    let outputBytes = 0;
+
     // Heartbeat to show activity
     let lastActivity = Date.now();
     const heartbeat = setInterval(() => {
       const elapsed = Math.floor((Date.now() - lastActivity) / 1000);
       if (elapsed > 10) {
-        this.reportProgress(`Analyzing... (${elapsed}s since last update)`);
+        const status = receivedOutput ? `${outputBytes} bytes received` : 'waiting for Claude...';
+        this.reportProgress(`Analyzing... (${elapsed}s idle, ${status})`);
       }
     }, 5000);
 
@@ -349,6 +671,8 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
     // Process streaming output
     this.currentProcess.stdout?.on('data', (chunk: Buffer) => {
       lastActivity = Date.now();
+      receivedOutput = true;
+      outputBytes += chunk.length;
       const text = chunk.toString();
       buffer += text;
 
@@ -363,42 +687,57 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
 
     this.currentProcess.stderr?.on('data', (chunk: Buffer) => {
       lastActivity = Date.now();
+      receivedOutput = true;
+      outputBytes += chunk.length;
       const text = chunk.toString().trim();
       if (text) {
-        // Report stderr activity
-        this.reportProgress(`Claude: ${text.slice(0, 50)}...`);
+        // Report stderr activity - show more for debugging
+        this.reportProgress(`Claude stderr: ${text.slice(0, 100)}`);
       }
     });
 
     // Wait for process to complete
-    await new Promise<void>((resolve, reject) => {
-      // Timeout after 5 minutes
-      const timeout = setTimeout(() => {
-        this.currentProcess?.kill();
-        reject(new Error('Claude analysis timed out after 5 minutes'));
-      }, 300000);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // Timeout after 5 minutes
+        const timeout = setTimeout(() => {
+          this.currentProcess?.kill();
+          reject(new Error('Claude analysis timed out after 5 minutes'));
+        }, 300000);
 
-      this.currentProcess?.on('exit', (code) => {
-        clearTimeout(timeout);
-        if (code !== 0 && code !== null) {
-          // Non-zero exit, but don't reject - we may have partial results
-          this.reportProgress(`Claude exited with code ${code}`);
-        }
-        resolve();
+        this.currentProcess?.on('exit', (code) => {
+          clearTimeout(timeout);
+          if (code !== 0 && code !== null) {
+            // Non-zero exit, but don't reject - we may have partial results
+            this.reportProgress(`Claude exited with code ${code}`);
+          }
+          resolve();
+        });
+
+        this.currentProcess?.on('error', (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
       });
-
-      this.currentProcess?.on('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-
-    // Clean up heartbeat
-    clearInterval(heartbeat);
+    } finally {
+      // Clean up heartbeat - always runs, even on error/rejection
+      clearInterval(heartbeat);
+    }
 
     // Process any remaining buffer
     if (buffer.trim()) {
       this.processAgentOutput(buffer, callbacks);
+    }
+
+    // Extract all data from accumulated full response at the end
+    if (this.fullResponseBuffer) {
+      // Extract <json></json> blocks (primary method for new prompts)
+      this.extractJsonBlocks(callbacks);
+
+      // Fallback: try to extract from unstructured JSON (legacy)
+      if (callbacks.onUnderstanding) {
+        this.tryExtractUnderstandingJson(this.fullResponseBuffer, callbacks);
+      }
     }
 
     this.currentProcess = undefined;
@@ -472,6 +811,8 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
         // Final result - check for our markers and understanding
         if (event.result) {
           this.processTextContent(event.result, callbacks);
+          // Also try to extract JSON from the result if no marker found
+          this.tryExtractUnderstandingJson(event.result, callbacks);
         }
         callbacks.onComplete?.();
       } else if (event.type === 'error') {
@@ -503,6 +844,8 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
 
   // Accumulated text for marker detection in streaming responses
   private streamBuffer = '';
+  // Full response text for final extraction
+  private fullResponseBuffer = '';
 
   private processTextContent(
     text: string,
@@ -515,8 +858,12 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
     }
   ): void {
     this.streamBuffer += text;
+    this.fullResponseBuffer += text; // Accumulate for final extraction
 
-    // Check for complete markers in the accumulated buffer
+    // Note: We extract <json> blocks at the END of streaming (in runAgenticClaude)
+    // to avoid issues with incomplete blocks during streaming
+
+    // Check for legacy markers (line-based)
     const lines = this.streamBuffer.split('\n');
     this.streamBuffer = lines.pop() || ''; // Keep incomplete line
 
@@ -535,6 +882,146 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
       }
     }
   }
+
+  /**
+   * Extract complete <json></json> blocks from the full response buffer
+   * Called once at the end of streaming for reliability
+   */
+  private extractJsonBlocks(callbacks: {
+    onBugFound?: (bugJson: string) => void;
+    onUnderstanding?: (json: string) => void;
+    onComplete?: () => void;
+  }): void {
+    // Look for complete <json>...</json> blocks
+    const jsonBlockRegex = /<json>([\s\S]*?)<\/json>/g;
+    let match;
+    let bugsFound = 0;
+    let needsReviewFound = 0;
+
+    while ((match = jsonBlockRegex.exec(this.fullResponseBuffer)) !== null) {
+      const jsonStr = match[1].trim();
+
+      try {
+        const parsed = JSON.parse(jsonStr);
+
+        // Determine type from content
+        if (parsed.type === 'bug' && parsed.data) {
+          callbacks.onBugFound?.(JSON.stringify(parsed.data));
+          bugsFound++;
+          this.reportProgress(`Found: ${parsed.data.title}`);
+        } else if (parsed.type === 'needsReview' && parsed.data) {
+          // Treat needs-review as low-confidence bug
+          callbacks.onBugFound?.(JSON.stringify({ ...parsed.data, confidence: 'low' }));
+          needsReviewFound++;
+          this.reportProgress(`Review: ${parsed.data.title}`);
+        } else if (parsed.type === 'complete' && parsed.summary) {
+          this.reportProgress(`Claude: ${parsed.summary.bugsFound} bugs, ${parsed.summary.needsReview} to review`);
+          callbacks.onComplete?.();
+        } else if (parsed.summary && (parsed.summary.type || parsed.summary.language)) {
+          // Understanding object
+          callbacks.onUnderstanding?.(jsonStr);
+        } else if (parsed.bugs && Array.isArray(parsed.bugs)) {
+          // Quick scan format - array of bugs
+          for (const bug of parsed.bugs) {
+            callbacks.onBugFound?.(JSON.stringify(bug));
+            bugsFound++;
+          }
+          this.reportProgress(`Found ${parsed.bugs.length} bugs`);
+        }
+      } catch {
+        // Invalid JSON, skip
+      }
+    }
+
+    if (bugsFound > 0 || needsReviewFound > 0) {
+      this.reportProgress(`Extracted: ${bugsFound} bugs, ${needsReviewFound} to review`);
+    }
+  }
+
+  // Try to extract understanding JSON from text without markers
+  private tryExtractUnderstandingJson(
+    text: string,
+    callbacks: {
+      onUnderstanding?: (json: string) => void;
+    }
+  ): void {
+    // First try code blocks (most reliable)
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlockMatch) {
+      const jsonStr = codeBlockMatch[1].trim();
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.summary && (parsed.summary.type || parsed.summary.language)) {
+          callbacks.onUnderstanding?.(jsonStr);
+          return;
+        }
+      } catch {
+        // Not valid JSON in code block
+      }
+    }
+
+    // Try to find balanced JSON objects containing "summary"
+    // Track string state to avoid counting braces inside strings
+    const candidates: string[] = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) continue;
+
+      if (char === '{') {
+        if (depth === 0) {
+          start = i;
+        }
+        depth++;
+      } else if (char === '}') {
+        depth--;
+        if (depth === 0 && start !== -1) {
+          const candidate = text.slice(start, i + 1);
+          // Quick check if it might be our understanding object
+          if (candidate.includes('"summary"') && candidate.includes('"type"')) {
+            candidates.push(candidate);
+          }
+          start = -1;
+        }
+      }
+    }
+
+    // Try each candidate, preferring longer ones (more complete)
+    candidates.sort((a, b) => b.length - a.length);
+
+    for (const jsonStr of candidates) {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.summary && (parsed.summary.type || parsed.summary.language)) {
+          callbacks.onUnderstanding?.(jsonStr);
+          return;
+        }
+      } catch {
+        // Not valid JSON, try next
+      }
+    }
+  }
+
 
   // Simple non-agentic mode for short prompts (adversarial validation)
   private async runSimpleClaude(prompt: string, cwd: string): Promise<string> {
@@ -562,8 +1049,20 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
   // ─────────────────────────────────────────────────────────────
 
   private parseBugData(json: string, index: number, files: string[]): Bug | null {
+    // Pre-process to handle Claude's simpler confidence format
+    let parsed: any;
+    try {
+      parsed = JSON.parse(json);
+      // Convert string confidence to object format
+      if (typeof parsed.confidence === 'string') {
+        parsed.confidence = { overall: parsed.confidence };
+      }
+    } catch {
+      return null;
+    }
+
     // Use Zod validation for safe parsing
-    const result = safeParseJson(json, PartialBugFromLLM);
+    const result = PartialBugFromLLM.safeParse(parsed);
     if (!result.success) {
       return null;
     }
@@ -604,6 +1103,7 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
       evidence: data.evidence || [],
       suggestedFix: data.suggestedFix,
       createdAt: new Date().toISOString(),
+      status: 'open',
     };
   }
 
@@ -637,9 +1137,9 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
   }
 
   private parseUnderstandingResponse(response: string, files: string[]): CodebaseUnderstanding {
-    // Count total lines from a sample (needed for fallback and success cases)
+    // Count total lines from all files
     let totalLines = 0;
-    for (const file of files.slice(0, 50)) {
+    for (const file of files) {
       try {
         const content = readFileSync(file, 'utf-8');
         totalLines += content.split('\n').length;
@@ -726,22 +1226,78 @@ Set "survived": true if you CANNOT disprove it (it's a real bug).`;
   // ─────────────────────────────────────────────────────────────
 
   private extractJson(text: string): string | null {
-    // Try markdown code blocks
+    // Try markdown code blocks first (most reliable)
     const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (codeBlockMatch) {
       return codeBlockMatch[1].trim();
     }
 
-    // Try raw JSON array
-    const arrayMatch = text.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
-      return arrayMatch[0];
+    // Find the first balanced JSON object or array
+    return this.findBalancedJson(text);
+  }
+
+  // Find the first balanced JSON object or array in text
+  private findBalancedJson(text: string): string | null {
+    // Find first { or [
+    const objectStart = text.indexOf('{');
+    const arrayStart = text.indexOf('[');
+
+    let start = -1;
+    let openChar = '{';
+    let closeChar = '}';
+
+    if (objectStart === -1 && arrayStart === -1) {
+      return null;
+    } else if (objectStart === -1) {
+      start = arrayStart;
+      openChar = '[';
+      closeChar = ']';
+    } else if (arrayStart === -1) {
+      start = objectStart;
+    } else {
+      // Use whichever comes first
+      if (arrayStart < objectStart) {
+        start = arrayStart;
+        openChar = '[';
+        closeChar = ']';
+      } else {
+        start = objectStart;
+      }
     }
 
-    // Try raw JSON object
-    const objectMatch = text.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-      return objectMatch[0];
+    // Count balanced braces, respecting strings
+    let depth = 0;
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = start; i < text.length; i++) {
+      const char = text[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) continue;
+
+      if (char === openChar) {
+        depth++;
+      } else if (char === closeChar) {
+        depth--;
+        if (depth === 0) {
+          return text.slice(start, i + 1);
+        }
+      }
     }
 
     return null;

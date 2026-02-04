@@ -161,13 +161,21 @@ function formatRuleName(category: string): string {
 
 function getCategoryDescription(category: string): string {
   const descriptions: Record<string, string> = {
-    'logic-error': 'Logic errors such as off-by-one, wrong operators, or incorrect conditions',
-    security: 'Security vulnerabilities including injection, auth bypass, and data exposure',
-    'async-race-condition': 'Async/concurrency issues like race conditions and missing awaits',
-    'edge-case': 'Edge cases that are not properly handled',
+    // Security
+    'injection': 'Injection vulnerabilities including SQL, command, and code injection',
+    'auth-bypass': 'Authentication and authorization bypass vulnerabilities',
+    'secrets-exposure': 'Exposure of secrets, credentials, or sensitive data',
+    // Reliability
     'null-reference': 'Potential null or undefined reference issues',
-    'type-coercion': 'Type coercion bugs that may cause unexpected behavior',
+    'boundary-error': 'Boundary errors including off-by-one and array index issues',
     'resource-leak': 'Resource leaks such as unclosed handles or connections',
+    'async-issue': 'Async/concurrency issues like race conditions and missing awaits',
+    // Correctness
+    'logic-error': 'Logic errors such as wrong operators or incorrect conditions',
+    'data-validation': 'Missing or improper input validation',
+    'type-coercion': 'Type coercion bugs that may cause unexpected behavior',
+    // Design
+    'concurrency': 'Thread safety and deadlock issues',
     'intent-violation': 'Violations of documented behavioral contracts or business rules',
   };
 

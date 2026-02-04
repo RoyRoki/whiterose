@@ -273,7 +273,7 @@ describe('providers/adapters/aider', () => {
       vi.mocked(execa).mockResolvedValue({
         stdout: JSON.stringify([
           { file: 'test.ts', line: 1, title: 'Bug', severity: 'high', category: 'null' },
-          { file: 'test.ts', line: 2, title: 'Bug', severity: 'high', category: 'security' },
+          { file: 'test.ts', line: 2, title: 'Bug', severity: 'high', category: 'injection' },
           { file: 'test.ts', line: 3, title: 'Bug', severity: 'high', category: 'race' },
         ]),
         stderr: '',
@@ -287,8 +287,8 @@ describe('providers/adapters/aider', () => {
       });
 
       expect(bugs[0].category).toBe('null-reference');
-      expect(bugs[1].category).toBe('security');
-      expect(bugs[2].category).toBe('async-race-condition');
+      expect(bugs[1].category).toBe('injection');
+      expect(bugs[2].category).toBe('async-issue');
     });
 
     it('should default to logic-error for unknown categories', async () => {

@@ -134,8 +134,15 @@ export async function isProviderAvailable(name: ProviderType): Promise<boolean> 
 }
 
 /**
- * Get the resolved command path for a provider
+ * Get the resolved command path for a provider.
+ * Returns the cached path if available, otherwise uses the default command name.
  */
 export function getProviderCommand(name: ProviderType): string {
-  return resolvedPaths.get(name) || name.replace('-code', '');
+  // Check if we have a cached resolved path
+  const cached = resolvedPaths.get(name);
+  if (cached) return cached;
+
+  // Fallback to the provider's expected command name
+  const check = providerChecks.find((c) => c.name === name);
+  return check?.command || name;
 }

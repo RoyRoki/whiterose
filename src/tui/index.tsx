@@ -3,6 +3,7 @@ import { render } from 'ink';
 import { Bug, WhiteroseConfig } from '../types.js';
 import { App } from './App.js';
 import { applyFix } from '../core/fixer.js';
+import { removeBugFromAccumulated } from '../core/bug-merger.js';
 
 interface FixOptions {
   dryRun: boolean;
@@ -12,11 +13,22 @@ interface FixOptions {
 export async function startFixTUI(
   bugs: Bug[],
   config: WhiteroseConfig,
-  options: FixOptions
+  options: FixOptions,
+  cwd?: string
 ): Promise<void> {
   return new Promise((resolve) => {
-    const handleFix = async (bug: Bug) => {
-      await applyFix(bug, config, options);
+    const handleFix = async (bug: Bug): Promise<void> => {
+      const result = await applyFix(bug, config, options);
+
+      // Throw on failure so TUI shows error correctly
+      if (!result.success) {
+        throw new Error(result.error || 'Fix failed');
+      }
+
+      // Remove bug from accumulated list after successful fix (not dry-run)
+      if (!options.dryRun && cwd) {
+        removeBugFromAccumulated(cwd, bug.id);
+      }
     };
 
     const handleExit = () => {
