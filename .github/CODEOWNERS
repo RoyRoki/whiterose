@@ -1,0 +1,14 @@
+# Default owners for everything
+* @shakecodeslikecray
+
+# Core scanner logic requires owner review
+/src/core/scanner.ts @shakecodeslikecray
+/src/core/multipass-scanner.ts @shakecodeslikecray
+/src/core/flow-analyzer.ts @shakecodeslikecray
+
+# Provider implementations
+/src/providers/ @shakecodeslikecray
+
+# Security-sensitive files
+/src/core/fixer.ts @shakecodeslikecray
+/src/analysis/ @shakecodeslikecray
