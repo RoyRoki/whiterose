@@ -99,7 +99,8 @@ describe('analysis/static', () => {
 
       expect(results.length).toBeGreaterThan(0);
       expect(results[0].tool).toBe('typescript');
-      expect(results[0].file).toBe('src/test.ts');
+      // normalizeFilePath converts relative paths to absolute
+      expect(results[0].file).toBe('/project/src/test.ts');
       expect(results[0].line).toBe(10);
     });
 

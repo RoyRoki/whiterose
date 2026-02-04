@@ -5,7 +5,7 @@ import { join } from 'path';
 import { WhiteroseConfig, ScanResult, Bug, ConfidenceLevel } from '../../types.js';
 import { loadConfig, loadUnderstanding } from '../../core/config.js';
 import { getProvider } from '../../providers/index.js';
-import { scanCodebase, getChangedFiles } from '../../core/scanner/index.js';
+import { scanCodebase, getChangedFiles, saveFileHashes } from '../../core/scanner/index.js';
 import { runStaticAnalysis } from '../../analysis/static.js';
 import { generateBugId } from '../../core/utils.js';
 import { outputSarif } from '../../output/sarif.js';
@@ -89,6 +89,7 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   // ─────────────────────────────────────────────────────────────
   let filesToScan: string[];
   let scanType: 'full' | 'incremental';
+  let pendingHashState: any = null;
 
   if (options.full || paths.length > 0) {
     scanType = 'full';
@@ -108,8 +109,9 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
       filesToScan = await scanCodebase(cwd);
     } else {
       scanType = 'incremental';
-      const changed = await getChangedFiles(cwd, config);
+      const changed = await getChangedFiles(cwd, config, { writeCache: false });
       filesToScan = changed.files;
+      pendingHashState = changed.state;
     }
 
     if (filesToScan.length === 0) {
@@ -308,6 +310,15 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   // ─────────────────────────────────────────────────────────────
   // Output
   // ─────────────────────────────────────────────────────────────
+  // Persist hash cache only after a successful analysis run
+  if (pendingHashState) {
+    try {
+      saveFileHashes(cwd, pendingHashState);
+    } catch {
+      // Non-fatal: cache persistence failure should not break scan output
+    }
+  }
+
   if (options.json || (options.ci && !options.sarif)) {
     // JSON output (default for CI mode)
     console.log(JSON.stringify(result, null, 2));

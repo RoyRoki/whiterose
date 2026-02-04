@@ -1,6 +1,6 @@
 import { execa } from 'execa';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, resolve, isAbsolute } from 'path';
 import { WhiteroseConfig, StaticAnalysisResult } from '../types.js';
 
 export async function runStaticAnalysis(
@@ -46,20 +46,21 @@ async function runTypeScript(cwd: string): Promise<StaticAnalysisResult[]> {
     });
   } catch (error: any) {
     // Parse TypeScript errors from stdout
-    const output = error.stdout || '';
+    const output = [error.stdout, error.stderr].filter(Boolean).join('\n');
     const lines = output.split('\n');
 
     for (const line of lines) {
       // Format: path/to/file.ts(line,col): error TS1234: message
-      const match = line.match(/^(.+)\((\d+),(\d+)\):\s+(error|warning)\s+TS\d+:\s+(.+)$/);
+      const match = line.match(/^(.+)\((\d+),(\d+)\):\s+(error|warning)\s+TS(\d+):\s+(.+)$/);
       if (match) {
+        const filePath = normalizeFilePath(match[1], cwd);
         results.push({
           tool: 'typescript',
-          file: match[1],
+          file: filePath,
           line: parseInt(match[2], 10),
-          message: match[5],
+          message: match[6],
           severity: match[4] === 'error' ? 'error' : 'warning',
-          code: `TS${match[4]}`,
+          code: `TS${match[5]}`,
         });
       }
     }
@@ -84,46 +85,55 @@ async function runEslint(cwd: string, files: string[]): Promise<StaticAnalysisRe
     return results;
   }
 
-  try {
-    // Run eslint with JSON output
-    const { stdout } = await execa(
-      'npx',
-      ['eslint', '--format', 'json', '--no-error-on-unmatched-pattern', ...files.slice(0, 50)],
-      {
-        cwd,
-        timeout: 60000,
-        reject: false,
-      }
-    );
+  if (files.length === 0) {
+    return results;
+  }
 
-    // ESLint may output warnings before JSON - try to extract JSON array
-    let eslintResults: any[] = [];
-    try {
-      // First try direct parse
-      eslintResults = JSON.parse(stdout || '[]');
-    } catch {
-      // Try to find JSON array in output (skip any prefix warnings)
-      const jsonMatch = (stdout || '').match(/\[\s*\{[\s\S]*\}\s*\]|\[\s*\]/);
-      if (jsonMatch) {
-        try {
-          eslintResults = JSON.parse(jsonMatch[0]);
-        } catch {
-          // Give up - ESLint output is not parseable
-          return results;
+  try {
+    const batchSize = 50;
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize);
+      // Run eslint with JSON output
+      const { stdout } = await execa(
+        'npx',
+        ['eslint', '--format', 'json', '--no-error-on-unmatched-pattern', ...batch],
+        {
+          cwd,
+          timeout: 60000,
+          reject: false,
+        }
+      );
+
+      // ESLint may output warnings before JSON - try to extract JSON array
+      let eslintResults: any[] = [];
+      try {
+        // First try direct parse
+        eslintResults = JSON.parse(stdout || '[]');
+      } catch {
+        // Try to find JSON array in output (skip any prefix warnings)
+        const jsonMatch = (stdout || '').match(/\[\s*\{[\s\S]*\}\s*\]|\[\s*\]/);
+        if (jsonMatch) {
+          try {
+            eslintResults = JSON.parse(jsonMatch[0]);
+          } catch {
+            // Give up on this batch - continue with the next
+            continue;
+          }
         }
       }
-    }
 
-    for (const fileResult of eslintResults) {
-      for (const message of fileResult.messages || []) {
-        results.push({
-          tool: 'eslint',
-          file: fileResult.filePath,
-          line: message.line || 0,
-          message: message.message,
-          severity: message.severity === 2 ? 'error' : 'warning',
-          code: message.ruleId,
-        });
+      for (const fileResult of eslintResults) {
+        const filePath = normalizeFilePath(fileResult.filePath, cwd);
+        for (const message of fileResult.messages || []) {
+          results.push({
+            tool: 'eslint',
+            file: filePath,
+            line: message.line || 0,
+            message: message.message,
+            severity: message.severity === 2 ? 'error' : 'warning',
+            code: message.ruleId,
+          });
+        }
       }
     }
   } catch {
@@ -131,4 +141,9 @@ async function runEslint(cwd: string, files: string[]): Promise<StaticAnalysisRe
   }
 
   return results;
+}
+
+function normalizeFilePath(filePath: string, cwd: string): string {
+  if (!filePath) return filePath;
+  return isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
 }

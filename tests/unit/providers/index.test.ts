@@ -14,7 +14,21 @@ vi.mock('../../../src/providers/adapters/aider', () => ({
   })),
 }));
 
-import { getProvider, ClaudeCodeProvider, AiderProvider } from '../../../src/providers';
+vi.mock('../../../src/providers/adapters/openai', () => ({
+  OpenAIProvider: vi.fn().mockImplementation(() => ({
+    name: 'codex',
+    isAvailable: vi.fn(),
+  })),
+}));
+
+vi.mock('../../../src/providers/adapters/ollama', () => ({
+  OllamaProvider: vi.fn().mockImplementation(() => ({
+    name: 'ollama',
+    isAvailable: vi.fn(),
+  })),
+}));
+
+import { getProvider, ClaudeCodeProvider, AiderProvider, OpenAIProvider, OllamaProvider } from '../../../src/providers';
 
 describe('providers/index', () => {
   beforeEach(() => {
@@ -71,16 +85,64 @@ describe('providers/index', () => {
       );
     });
 
-    it('should throw error for codex provider (not implemented)', async () => {
-      await expect(getProvider('codex')).rejects.toThrow('Codex provider not yet implemented');
+    it('should return codex provider when available', async () => {
+      vi.mocked(OpenAIProvider).mockImplementation(() => ({
+        name: 'codex',
+        isAvailable: vi.fn().mockResolvedValue(true),
+        detect: vi.fn(),
+        analyze: vi.fn(),
+        adversarialValidate: vi.fn(),
+        generateUnderstanding: vi.fn(),
+      }));
+
+      const provider = await getProvider('codex');
+
+      expect(provider.name).toBe('codex');
+    });
+
+    it('should throw error when codex provider is not available', async () => {
+      vi.mocked(OpenAIProvider).mockImplementation(() => ({
+        name: 'codex',
+        isAvailable: vi.fn().mockResolvedValue(false),
+        detect: vi.fn(),
+        analyze: vi.fn(),
+        adversarialValidate: vi.fn(),
+        generateUnderstanding: vi.fn(),
+      }));
+
+      await expect(getProvider('codex')).rejects.toThrow('Provider codex is not available');
     });
 
     it('should throw error for opencode provider (not implemented)', async () => {
       await expect(getProvider('opencode')).rejects.toThrow('OpenCode provider not yet implemented');
     });
 
-    it('should throw error for ollama provider (not implemented)', async () => {
-      await expect(getProvider('ollama')).rejects.toThrow('Ollama provider not yet implemented');
+    it('should return ollama provider when available', async () => {
+      vi.mocked(OllamaProvider).mockImplementation(() => ({
+        name: 'ollama',
+        isAvailable: vi.fn().mockResolvedValue(true),
+        detect: vi.fn(),
+        analyze: vi.fn(),
+        adversarialValidate: vi.fn(),
+        generateUnderstanding: vi.fn(),
+      }));
+
+      const provider = await getProvider('ollama');
+
+      expect(provider.name).toBe('ollama');
+    });
+
+    it('should throw error when ollama provider is not available', async () => {
+      vi.mocked(OllamaProvider).mockImplementation(() => ({
+        name: 'ollama',
+        isAvailable: vi.fn().mockResolvedValue(false),
+        detect: vi.fn(),
+        analyze: vi.fn(),
+        adversarialValidate: vi.fn(),
+        generateUnderstanding: vi.fn(),
+      }));
+
+      await expect(getProvider('ollama')).rejects.toThrow('Provider ollama is not available');
     });
 
     it('should throw error for unknown provider', async () => {
@@ -96,6 +158,14 @@ describe('providers/index', () => {
 
     it('should export AiderProvider', () => {
       expect(AiderProvider).toBeDefined();
+    });
+
+    it('should export OpenAIProvider', () => {
+      expect(OpenAIProvider).toBeDefined();
+    });
+
+    it('should export OllamaProvider', () => {
+      expect(OllamaProvider).toBeDefined();
     });
   });
 });

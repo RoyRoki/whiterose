@@ -1,6 +1,7 @@
 import { execa } from 'execa';
 import { spawn, type ChildProcess } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
+import { resolve, isAbsolute } from 'path';
 import {
   LLMProvider,
   ProviderType,
@@ -171,9 +172,10 @@ export class ClaudeCodeProvider implements LLMProvider {
     // Group static findings by file
     const staticByFile = new Map<string, Array<{ line: number; tool: string; message: string }>>();
     for (const result of staticResults) {
-      const existing = staticByFile.get(result.file) || [];
+      const filePath = normalizeFilePath(result.file, cwd);
+      const existing = staticByFile.get(filePath) || [];
       existing.push({ line: result.line, tool: result.tool, message: result.message });
-      staticByFile.set(result.file, existing);
+      staticByFile.set(filePath, existing);
     }
 
     // Load cache for checking and storing
@@ -1302,4 +1304,9 @@ FIX:`;
 
     return null;
   }
+}
+
+function normalizeFilePath(filePath: string, cwd: string): string {
+  if (!filePath) return filePath;
+  return isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
 }

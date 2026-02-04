@@ -11,6 +11,7 @@ describe('output/markdown', () => {
       file: 'src/users/profile.ts',
       line: 42,
       endLine: 42,
+      kind: 'bug',
       severity: 'high',
       category: 'null-reference',
       confidence: {
@@ -43,6 +44,7 @@ describe('output/markdown', () => {
       ],
       suggestedFix: 'return user?.name ?? "Unknown";',
       createdAt: '2024-01-01T00:00:00Z',
+      status: 'open',
     },
     {
       id: 'WR-002',
@@ -50,8 +52,9 @@ describe('output/markdown', () => {
       description: 'Counter increment is not atomic.',
       file: 'src/stats/counter.ts',
       line: 15,
+      kind: 'bug',
       severity: 'critical',
-      category: 'async-race-condition',
+      category: 'async-issue',
       confidence: {
         overall: 'medium',
         codePathValidity: 0.7,
@@ -63,10 +66,13 @@ describe('output/markdown', () => {
       codePath: [],
       evidence: ['Non-atomic read-modify-write pattern'],
       createdAt: '2024-01-01T00:00:00Z',
+      status: 'open',
     },
   ];
 
   const mockScanResult: ScanResult = {
+    id: 'scan-test',
+    timestamp: '2024-01-01T00:00:00Z',
     bugs: mockBugs,
     summary: {
       total: 2,
@@ -74,9 +80,12 @@ describe('output/markdown', () => {
       high: 1,
       medium: 0,
       low: 0,
+      bugs: 2,
+      smells: 0,
     },
     scanType: 'full',
     filesScanned: 50,
+    duration: 100,
   };
 
   describe('outputMarkdown', () => {
@@ -106,8 +115,8 @@ describe('output/markdown', () => {
     it('should group bugs by severity', () => {
       const md = outputMarkdown(mockScanResult);
 
-      expect(md).toContain('## Critical');
-      expect(md).toContain('## High');
+      expect(md).toContain('### Critical');
+      expect(md).toContain('### High');
     });
 
     it('should include bug details', () => {
@@ -150,12 +159,12 @@ describe('output/markdown', () => {
       const emptyResult: ScanResult = {
         ...mockScanResult,
         bugs: [],
-        summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0 },
+        summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, bugs: 0, smells: 0 },
       };
 
       const md = outputMarkdown(emptyResult);
 
-      expect(md).toContain('No bugs found');
+      expect(md).toContain('No findings found');
     });
 
     it('should include category in bug details', () => {

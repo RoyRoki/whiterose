@@ -27,6 +27,7 @@ export interface CodeUnit {
   endLine: number;
   code: string;
   hash: string; // For caching - hash of the code content
+  contextHash?: string; // Hash including local dependency/type context
   signature?: string; // Function/method signature without body
   className?: string; // For methods, the containing class
   exported: boolean;
@@ -241,11 +242,25 @@ export function buildOptimizedContext(
     }
   }
 
+  const signatureByName = new Map<string, string>();
+  for (const unit of fileAnalysis.units) {
+    if (unit.signature) {
+      signatureByName.set(unit.name, unit.signature);
+    }
+  }
+
+  const typeByName = new Map<string, string>();
+  for (const typeDef of fileAnalysis.types) {
+    typeByName.set(typeDef.name, typeDef.code);
+  }
+
   // Priority 1: Changed code (always include)
   for (const unit of changedUnits) {
     const tokens = estimateTokens(unit.code);
     if (context.estimatedTokens + tokens <= maxTokens) {
-      context.changedUnits.push(unit);
+      // Include local context (callee signatures + referenced types) in cache hash
+      const contextHash = computeContextHash(unit, signatureByName, typeByName);
+      context.changedUnits.push({ ...unit, contextHash });
       context.estimatedTokens += tokens;
     }
   }
@@ -334,6 +349,26 @@ export function formatContextForPrompt(context: OptimizedContext): string {
   }
 
   return sections.join('\n');
+}
+
+function computeContextHash(
+  unit: CodeUnit,
+  signatureByName: Map<string, string>,
+  typeByName: Map<string, string>
+): string {
+  const parts: string[] = [unit.code];
+
+  for (const call of unit.calls) {
+    const sig = signatureByName.get(call);
+    if (sig) parts.push(sig);
+  }
+
+  for (const ref of unit.references) {
+    const typeDef = typeByName.get(ref);
+    if (typeDef) parts.push(typeDef);
+  }
+
+  return createHash('md5').update(parts.join('\n')).digest('hex');
 }
 
 // ─────────────────────────────────────────────────────────────

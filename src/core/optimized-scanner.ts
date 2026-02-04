@@ -15,7 +15,7 @@
 
 import { execa } from 'execa';
 import { existsSync, readFileSync } from 'fs';
-import { join, relative } from 'path';
+import { join, relative, resolve, isAbsolute } from 'path';
 import fg from 'fast-glob';
 import {
   analyzeFile,
@@ -274,6 +274,10 @@ export function formatOptimizedPromptContext(
   staticResults: StaticAnalysisResult[]
 ): string {
   const sections: string[] = [];
+  const normalizedStaticResults = staticResults.map((r) => ({
+    ...r,
+    file: normalizeFilePath(r.file),
+  }));
 
   // File header
   const relativePath = relative(process.cwd(), target.filePath);
@@ -283,7 +287,7 @@ export function formatOptimizedPromptContext(
   sections.push('');
 
   // Static analysis findings for this file
-  const fileStaticResults = staticResults.filter((r) => r.file === target.filePath);
+  const fileStaticResults = normalizedStaticResults.filter((r) => r.file === target.filePath);
   if (fileStaticResults.length > 0) {
     sections.push('# STATIC ANALYSIS FINDINGS:');
     for (const result of fileStaticResults) {
@@ -296,6 +300,11 @@ export function formatOptimizedPromptContext(
   sections.push(formatContextForPrompt(context));
 
   return sections.join('\n');
+}
+
+function normalizeFilePath(filePath: string): string {
+  if (!filePath) return filePath;
+  return isAbsolute(filePath) ? filePath : resolve(process.cwd(), filePath);
 }
 
 /**

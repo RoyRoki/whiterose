@@ -40,8 +40,9 @@ export function hashFile(filePath: string): string {
 
 export async function getChangedFiles(
   cwd: string,
-  config: WhiteroseConfig
-): Promise<{ files: string[]; hashes: FileHash[] }> {
+  config: WhiteroseConfig,
+  options?: { writeCache?: boolean }
+): Promise<{ files: string[]; hashes: FileHash[]; state: CacheState }> {
   const cachePath = join(cwd, '.whiterose', 'cache', 'file-hashes.json');
 
   // Get current files
@@ -83,7 +84,7 @@ export async function getChangedFiles(
     }
   }
 
-  // Update cache
+  // Prepare updated cache state (write only if requested)
   const newState: CacheState = {
     version: '1',
     lastIncrementalScan: new Date().toISOString(),
@@ -91,9 +92,16 @@ export async function getChangedFiles(
     fileHashes: newHashes,
   };
 
-  writeFileSync(cachePath, JSON.stringify(newState, null, 2), 'utf-8');
+  if (options?.writeCache !== false) {
+    writeFileSync(cachePath, JSON.stringify(newState, null, 2), 'utf-8');
+  }
 
-  return { files: changedFiles, hashes: newHashes };
+  return { files: changedFiles, hashes: newHashes, state: newState };
+}
+
+export function saveFileHashes(cwd: string, state: CacheState): void {
+  const cachePath = join(cwd, '.whiterose', 'cache', 'file-hashes.json');
+  writeFileSync(cachePath, JSON.stringify(state, null, 2), 'utf-8');
 }
 
 export async function getDependentFiles(
