@@ -273,7 +273,7 @@ function parseListItems(content: string): string[] {
 }
 
 function parseFeatureSection(section: string): FeatureIntent | null {
-  const titleMatch = section.match(/###\s+([^\[\n]+)(?:\s*\[([^\]]+)\])?/);
+  const titleMatch = section.match(/###\s+([^[\n]+)(?:\s*\[([^\]]+)\])?/);
   if (!titleMatch) return null;
 
   const name = titleMatch[1].trim();

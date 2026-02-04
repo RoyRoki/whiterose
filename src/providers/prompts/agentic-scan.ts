@@ -159,7 +159,7 @@ When you find a CONFIRMED bug, report it like this:
   "triggerInput": "GET /api/users?name='; DROP TABLE users; --",
   "codePath": [
     {"step": 1, "file": "src/api/users.ts", "line": 38, "code": "const name = req.query.name", "explanation": "User input enters here"},
-    {"step": 2, "file": "src/api/users.ts", "line": 41, "code": "const query = 'SELECT * FROM users WHERE name = \\\"' + name + '\\\"'", "explanation": "Concatenated into SQL"},
+    {"step": 2, "file": "src/api/users.ts", "line": 41, "code": "const query = 'SELECT * FROM users WHERE name = "' + name + '"'", "explanation": "Concatenated into SQL"},
     {"step": 3, "file": "src/api/users.ts", "line": 42, "code": "db.execute(query)", "explanation": "Executed with injected SQL"}
   ],
   "evidence": [

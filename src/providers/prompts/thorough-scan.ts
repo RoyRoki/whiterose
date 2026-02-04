@@ -153,14 +153,14 @@ Only report when you find a CONFIRMED bug. Use this EXACT format:
     "line": 42,
     "endLine": 45,
     "title": "SQL injection in user search",
-    "description": "User input is concatenated into SQL query without parameterization. When req.query.name contains \\\"'; DROP TABLE users; --\\\", the query becomes malicious. This is exploitable from any HTTP client.",
+    "description": "User input is concatenated into SQL query without parameterization. When req.query.name contains "'; DROP TABLE users; --", the query becomes malicious. This is exploitable from any HTTP client.",
     "category": "injection",
     "severity": "critical",
     "confidence": "high",
     "triggerInput": "GET /api/users?name='; DROP TABLE users; --",
     "codePath": [
       {"file": "src/api/users.ts", "line": 38, "code": "const name = req.query.name", "explanation": "User input enters here from query string"},
-      {"file": "src/api/users.ts", "line": 41, "code": "const query = 'SELECT * FROM users WHERE name = \\\"' + name + '\\\"'", "explanation": "Concatenated into SQL without escaping"},
+      {"file": "src/api/users.ts", "line": 41, "code": "const query = 'SELECT * FROM users WHERE name = "' + name + '"'", "explanation": "Concatenated into SQL without escaping"},
       {"file": "src/api/users.ts", "line": 42, "code": "db.execute(query)", "explanation": "Executed with injected SQL"}
     ],
     "evidence": [
