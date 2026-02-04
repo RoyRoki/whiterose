@@ -1,5 +1,4 @@
 import * as p from '@clack/prompts';
-import chalk from 'chalk';
 import { existsSync, readFileSync, writeFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { outputMarkdown } from '../../output/markdown.js';

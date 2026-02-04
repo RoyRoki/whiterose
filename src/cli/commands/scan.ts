@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { WhiteroseConfig, ScanResult, Bug, ConfidenceLevel, ProviderType } from '../../types.js';
 import { loadConfig, loadUnderstanding } from '../../core/config.js';
@@ -12,11 +12,10 @@ import { generateBugId } from '../../core/utils.js';
 import { outputSarif } from '../../output/sarif.js';
 import { outputMarkdown } from '../../output/markdown.js';
 import { outputHumanReadableMarkdown } from '../../output/human-readable.js';
-import { mergeBugs, getAccumulatedBugsStats } from '../../core/bug-merger.js';
+import { mergeBugs } from '../../core/bug-merger.js';
 import { analyzeCrossFile } from '../../core/cross-file-analyzer.js';
 import { analyzeContracts } from '../../core/contract-analyzer.js';
 import { analyzeIntentContracts, classifyFindings } from '../../core/findings.js';
-import YAML from 'yaml';
 
 interface ScanOptions {
   full: boolean;

@@ -32,25 +32,6 @@ export interface ExtractedIntent {
 }
 
 /**
- * Common documentation file patterns
- */
-const DOC_PATTERNS = [
-  'README.md',
-  'README',
-  'readme.md',
-  'CONTRIBUTING.md',
-  'CONTRIBUTING',
-  'CHANGELOG.md',
-  'CHANGELOG',
-  'HISTORY.md',
-  'docs/**/*.md',
-  'documentation/**/*.md',
-  'API.md',
-  '.env.example',
-  '.env.sample',
-];
-
-/**
  * Read all existing documentation from a codebase
  */
 export async function readExistingDocs(cwd: string): Promise<ExistingDocs> {

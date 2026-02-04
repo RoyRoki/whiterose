@@ -14,7 +14,7 @@
  */
 
 import { execa } from 'execa';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync } from 'fs';
 import { join, relative, resolve, isAbsolute } from 'path';
 import fg from 'fast-glob';
 import {
@@ -34,7 +34,7 @@ import {
   expandCachedBugs,
   type CacheFile,
 } from './analysis-cache.js';
-import { getDependentFiles, buildDependencyGraph } from './dependencies.js';
+import { getDependentFiles } from './dependencies.js';
 import { Bug, CodebaseUnderstanding, StaticAnalysisResult } from '../types.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -271,7 +271,7 @@ export function checkCache(
 export function formatOptimizedPromptContext(
   target: ScanTarget,
   context: OptimizedContext,
-  understanding: CodebaseUnderstanding,
+  _understanding: CodebaseUnderstanding,
   staticResults: StaticAnalysisResult[]
 ): string {
   const sections: string[] = [];
@@ -314,8 +314,8 @@ function normalizeFilePath(filePath: string): string {
 export async function prepareOptimizedScan(
   cwd: string,
   tier: ScanTier,
-  understanding: CodebaseUnderstanding,
-  staticResults: StaticAnalysisResult[],
+  _understanding: CodebaseUnderstanding,
+  _staticResults: StaticAnalysisResult[],
   specificFiles?: string[]
 ): Promise<OptimizedScanResult> {
   const config = TIER_CONFIGS[tier];
@@ -335,7 +335,7 @@ export async function prepareOptimizedScan(
 
       // Check cache
       if (cache) {
-        const { cachedBugs, uncachedUnits } = checkCache(
+        const { cachedBugs: _cachedBugs, uncachedUnits } = checkCache(
           cache,
           result.context.changedUnits,
           target.filePath
@@ -362,7 +362,7 @@ export async function prepareOptimizedScan(
 /**
  * Estimate scan time based on tier and number of targets
  */
-function estimateScanTime(tier: ScanTier, targetCount: number, contextCount: number): string {
+function estimateScanTime(tier: ScanTier, _targetCount: number, contextCount: number): string {
   // Rough estimates based on typical LLM response times
   const baseTimePerContext: Record<ScanTier, number> = {
     instant: 2, // 2 seconds per context
@@ -435,6 +435,8 @@ export {
   findChangedUnits,
   buildOptimizedContext,
   formatContextForPrompt,
+} from './ast-analysis.js';
+export type {
   CodeUnit,
   FileAnalysis,
   OptimizedContext,

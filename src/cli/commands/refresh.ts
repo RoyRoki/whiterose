@@ -12,7 +12,7 @@ interface RefreshOptions {
   keepConfig: boolean;
 }
 
-export async function refreshCommand(options: RefreshOptions): Promise<void> {
+export async function refreshCommand(_options: RefreshOptions): Promise<void> {
   const cwd = process.cwd();
   const whiterosePath = join(cwd, '.whiterose');
 

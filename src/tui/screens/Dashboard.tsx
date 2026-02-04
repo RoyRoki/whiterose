@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { Bug, BugSeverity, BugCategory } from '../../types.js';
+import { Bug } from '../../types.js';
 
 interface DashboardProps {
   bugs: Bug[];
@@ -66,7 +66,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ bugs, onSelectCategory }) 
     });
   }
 
-  useInput((input, key) => {
+  useInput((_input, key) => {
     if (key.upArrow) {
       setSelectedIndex((i) => Math.max(0, i - 1));
     } else if (key.downArrow) {

@@ -21,7 +21,7 @@
  * 10. Cross-File - Data flow across module boundaries
  */
 
-import { Bug, CodebaseUnderstanding, BugCategory, AdversarialResult } from '../types.js';
+import { Bug, BugCategory } from '../types.js';
 
 export interface PassConfig {
   name: string;

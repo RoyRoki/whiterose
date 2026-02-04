@@ -12,9 +12,9 @@
  * Total: 10-25 minutes, not 95 minutes
  */
 
-import { Bug, BugCategory, CodebaseUnderstanding, Confidence, Severity } from '../types.js';
+import { Bug, CodebaseUnderstanding } from '../types.js';
 import { SCAN_PASSES } from './multipass-scanner.js';
-import { FLOW_PASSES, FlowPassConfig } from './flow-analyzer.js';
+import { FLOW_PASSES } from './flow-analyzer.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -62,8 +62,6 @@ export function buildTriagePrompt(
   understanding: CodebaseUnderstanding,
   files: string[],
 ): string {
-  // Combine all category search patterns into one comprehensive list
-  const allPatterns = SCAN_PASSES.flatMap(p => p.searchPatterns);
   const allCategories = SCAN_PASSES.map(p => `- ${p.name}: ${p.description}`).join('\n');
 
   return `# Security Bug Triage - Find Everything
@@ -168,7 +166,7 @@ export function buildValidationPrompt(bugs: Bug[]): string {
 - **Severity**: ${b.severity}
 - **Description**: ${b.description}
 - **Evidence**: ${b.evidence.join(' | ')}
-- **Trigger**: ${b.triggerScenario || 'Not specified'}
+- **Trigger**: ${(b as any).triggerScenario || 'Not specified'}
 `).join('\n');
 
   return `# Adversarial Bug Validation

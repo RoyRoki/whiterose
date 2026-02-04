@@ -1,4 +1,4 @@
-import React from 'react';
+/* @jsxImportSource react */
 import { render } from 'ink';
 import { Bug, WhiteroseConfig } from '../types.js';
 import { App, FixResultInfo } from './App.js';
@@ -49,7 +49,7 @@ export async function startFixTUI(
       resolve();
     };
 
-    const { unmount, waitUntilExit } = render(
+    const { waitUntilExit } = render(
       <App
         bugs={bugs}
         config={config}
@@ -59,7 +59,7 @@ export async function startFixTUI(
       />
     );
 
-    waitUntilExit().then(resolve).catch(reject);
+    waitUntilExit().then(resolve).catch(() => resolve());
   });
 }
 

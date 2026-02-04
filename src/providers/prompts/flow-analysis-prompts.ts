@@ -174,7 +174,7 @@ Remember: You're not looking for "might be vulnerable" - you're looking for "I t
  * Build a prompt for attack chain analysis (uses previous findings)
  */
 export function buildAttackChainPrompt(
-  ctx: FlowPromptContext,
+  _ctx: FlowPromptContext,
   allFindings: Array<{
     id: string;
     title: string;

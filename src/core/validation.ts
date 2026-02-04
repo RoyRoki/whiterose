@@ -8,7 +8,6 @@ import {
   CodebaseUnderstanding,
   CacheState,
   WhiteroseConfig,
-  AdversarialResult,
   BugSeverity,
   BugCategory,
   ConfidenceLevel,

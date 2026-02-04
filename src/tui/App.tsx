@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import { Bug, WhiteroseConfig } from '../types.js';
 import { Dashboard } from './screens/Dashboard.js';

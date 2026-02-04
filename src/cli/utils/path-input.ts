@@ -1,5 +1,5 @@
 import { readdirSync, statSync, existsSync } from 'fs';
-import { join, dirname, basename, resolve } from 'path';
+import { dirname, basename, resolve } from 'path';
 import chalk from 'chalk';
 import * as readline from 'readline';
 

@@ -14,7 +14,7 @@ import {
   JSON_OUTPUT_INSTRUCTION,
   TYPESCRIPT_WARNING,
 } from './constants.js';
-import { getRelevantPatterns, formatPatternsForPrompt } from './cwe-patterns.js';
+import { getRelevantPatterns } from './cwe-patterns.js';
 
 export interface QuickScanContext {
   filePath: string;

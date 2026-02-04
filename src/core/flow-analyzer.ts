@@ -12,7 +12,6 @@
  * 3. ATTACK CHAINS - Find combinations that create real exploits
  */
 
-import { Bug, BugCategory, CodebaseUnderstanding } from '../types.js';
 
 // ─────────────────────────────────────────────────────────────
 // Flow Analysis Pass Definitions
