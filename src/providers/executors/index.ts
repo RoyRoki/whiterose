@@ -10,6 +10,7 @@ import { ClaudeCodeExecutor } from './claude-code.js';
 import { CodexExecutor } from './codex.js';
 import { GeminiExecutor } from './gemini.js';
 import { AiderExecutor } from './aider.js';
+import { OllamaExecutor } from './ollama.js';
 import { ProviderType } from '../../types.js';
 
 const executors: Record<string, () => PromptExecutor> = {
@@ -17,6 +18,7 @@ const executors: Record<string, () => PromptExecutor> = {
   'codex': () => new CodexExecutor(),
   'gemini': () => new GeminiExecutor(),
   'aider': () => new AiderExecutor(),
+  'ollama': () => new OllamaExecutor(),
 };
 
 /**
@@ -50,3 +52,4 @@ export { ClaudeCodeExecutor } from './claude-code.js';
 export { CodexExecutor } from './codex.js';
 export { GeminiExecutor } from './gemini.js';
 export { AiderExecutor } from './aider.js';
+export { OllamaExecutor } from './ollama.js';

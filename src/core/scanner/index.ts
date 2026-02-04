@@ -56,7 +56,11 @@ export async function getChangedFiles(
 
   if (existsSync(cachePath)) {
     try {
-      cachedState = JSON.parse(readFileSync(cachePath, 'utf-8'));
+      const parsed = JSON.parse(readFileSync(cachePath, 'utf-8'));
+      // Validate fileHashes exists and is an array
+      if (Array.isArray(parsed.fileHashes)) {
+        cachedState = parsed;
+      }
     } catch {
       // Corrupted cache, use default empty state
     }

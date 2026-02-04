@@ -59,9 +59,7 @@ export async function startFixTUI(
       />
     );
 
-    waitUntilExit().then(() => {
-      resolve();
-    });
+    waitUntilExit().then(resolve).catch(reject);
   });
 }
 

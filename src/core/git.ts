@@ -73,8 +73,8 @@ export async function createFixBranch(
 
 export async function commitFix(bug: Bug, cwd: string = process.cwd()): Promise<string> {
   try {
-    // Stage the changed file
-    await execa('git', ['add', bug.file], { cwd, timeout: GIT_TIMEOUT });
+    // Stage the changed file (use -- to prevent option injection from malicious file paths)
+    await execa('git', ['add', '--', bug.file], { cwd, timeout: GIT_TIMEOUT });
 
     // Check if there are staged changes
     const { stdout: diff } = await execa('git', ['diff', '--cached', '--name-only'], {
