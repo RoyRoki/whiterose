@@ -2,6 +2,8 @@ import { ScanResult, Bug, BugSeverity } from '../types.js';
 
 export function outputMarkdown(result: ScanResult): string {
   const lines: string[] = [];
+  const verifiedBugs = result.bugs.filter((b) => b.kind === 'bug');
+  const smells = result.bugs.filter((b) => b.kind === 'smell');
 
   // Header
   lines.push('# Bug Report');
@@ -18,7 +20,9 @@ export function outputMarkdown(result: ScanResult): string {
   lines.push(`| High | ${result.summary.high} |`);
   lines.push(`| Medium | ${result.summary.medium} |`);
   lines.push(`| Low | ${result.summary.low} |`);
-  lines.push(`| **Total** | **${result.summary.total}** |`);
+  lines.push(`| **Verified Bugs** | **${result.summary.bugs}** |`);
+  lines.push(`| **Smells** | **${result.summary.smells}** |`);
+  lines.push(`| **Total Findings** | **${result.summary.total}** |`);
   lines.push('');
 
   // Scan info
@@ -29,9 +33,14 @@ export function outputMarkdown(result: ScanResult): string {
   }
   lines.push('');
 
-  if (result.bugs.length === 0) {
-    lines.push('No bugs found.');
+  if (verifiedBugs.length === 0 && smells.length === 0) {
+    lines.push('No findings found.');
     return lines.join('\n');
+  }
+
+  if (verifiedBugs.length === 0 && smells.length > 0) {
+    lines.push('No verified bugs found. Smells are listed below.');
+    lines.push('');
   }
 
   // Group by severity
@@ -42,47 +51,68 @@ export function outputMarkdown(result: ScanResult): string {
     low: [],
   };
 
-  for (const bug of result.bugs) {
+  for (const bug of verifiedBugs) {
     bySeverity[bug.severity].push(bug);
   }
 
-  // Critical bugs
+  if (verifiedBugs.length > 0) {
+    lines.push('## Verified Bugs');
+    lines.push('');
+    emitBySeverity(lines, bySeverity);
+  }
+
+  if (smells.length > 0) {
+    const smellsBySeverity: Record<BugSeverity, Bug[]> = {
+      critical: [],
+      high: [],
+      medium: [],
+      low: [],
+    };
+
+    for (const smell of smells) {
+      smellsBySeverity[smell.severity].push(smell);
+    }
+
+    lines.push('## Smells');
+    lines.push('');
+    emitBySeverity(lines, smellsBySeverity);
+  }
+
+  return lines.join('\n');
+}
+
+function emitBySeverity(lines: string[], bySeverity: Record<BugSeverity, Bug[]>): void {
   if (bySeverity.critical.length > 0) {
-    lines.push('## Critical');
+    lines.push('### Critical');
     lines.push('');
     for (const bug of bySeverity.critical) {
       lines.push(formatBug(bug));
     }
   }
 
-  // High bugs
   if (bySeverity.high.length > 0) {
-    lines.push('## High');
+    lines.push('### High');
     lines.push('');
     for (const bug of bySeverity.high) {
       lines.push(formatBug(bug));
     }
   }
 
-  // Medium bugs
   if (bySeverity.medium.length > 0) {
-    lines.push('## Medium');
+    lines.push('### Medium');
     lines.push('');
     for (const bug of bySeverity.medium) {
       lines.push(formatBug(bug));
     }
   }
 
-  // Low bugs
   if (bySeverity.low.length > 0) {
-    lines.push('## Low');
+    lines.push('### Low');
     lines.push('');
     for (const bug of bySeverity.low) {
       lines.push(formatBug(bug));
     }
   }
-
-  return lines.join('\n');
 }
 
 function formatBug(bug: Bug): string {
@@ -90,7 +120,8 @@ function formatBug(bug: Bug): string {
 
   // Title with ID and confidence
   const confidenceBadge = getConfidenceBadge(bug.confidence.overall);
-  lines.push(`### ${bug.id}: ${bug.title} ${confidenceBadge}`);
+  const kindBadge = bug.kind === 'smell' ? '`[SMELL]`' : '`[BUG]`';
+  lines.push(`### ${bug.id}: ${bug.title} ${kindBadge} ${confidenceBadge}`);
   lines.push('');
 
   // Location

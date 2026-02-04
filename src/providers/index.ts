@@ -1,13 +1,15 @@
 import { LLMProvider, ProviderType } from '../types.js';
 import { ClaudeCodeProvider } from './adapters/claude-code.js';
 import { AiderProvider } from './adapters/aider.js';
-import { OpenAIProvider } from './adapters/openai.js';
+import { CodexProvider } from './adapters/codex.js';
 import { OllamaProvider } from './adapters/ollama.js';
+// OpenAI API provider kept for v2 API-based access
+// import { OpenAIProvider } from './adapters/openai.js';
 
 const providers: Record<ProviderType, () => LLMProvider> = {
   'claude-code': () => new ClaudeCodeProvider(),
   aider: () => new AiderProvider(),
-  codex: () => new OpenAIProvider(), // OpenAI GPT-4o / Codex
+  codex: () => new CodexProvider(), // OpenAI Codex CLI
   opencode: () => {
     throw new Error('OpenCode provider not yet implemented');
   },
@@ -34,4 +36,4 @@ export async function getProvider(name: ProviderType): Promise<LLMProvider> {
   return provider;
 }
 
-export { ClaudeCodeProvider, AiderProvider, OpenAIProvider, OllamaProvider };
+export { ClaudeCodeProvider, AiderProvider, CodexProvider, OllamaProvider };

@@ -1085,6 +1085,7 @@ FIX:`;
       file: filePath,
       line: data.line,
       endLine: data.endLine,
+      kind: data.kind || 'bug',
       severity: data.severity ?? 'medium',
       category: data.category ?? 'logic-error',
       confidence: {

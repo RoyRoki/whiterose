@@ -251,7 +251,8 @@ export function checkCache(
   const uncachedUnits: CodeUnit[] = [];
 
   for (const unit of units) {
-    const cached = getCachedResult(cache, unit.hash);
+    const cacheKey = getUnitCacheKey(unit);
+    const cached = getCachedResult(cache, cacheKey);
     if (cached) {
       // Expand cached bugs
       const bugs = expandCachedBugs(cached, filePath, `CACHED-${unit.name}`);
@@ -396,8 +397,12 @@ export function cacheResults(
       (bug) => bug.line >= unit.startLine && bug.line <= unit.endLine
     );
 
-    setCachedResult(cache, unit.hash, filePath, unit.name, unit.type, unitBugs);
+    setCachedResult(cache, getUnitCacheKey(unit), filePath, unit.name, unit.type, unitBugs);
   }
+}
+
+function getUnitCacheKey(unit: CodeUnit): string {
+  return unit.contextHash || unit.hash;
 }
 
 /**

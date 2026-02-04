@@ -14,8 +14,8 @@ vi.mock('../../../src/providers/adapters/aider', () => ({
   })),
 }));
 
-vi.mock('../../../src/providers/adapters/openai', () => ({
-  OpenAIProvider: vi.fn().mockImplementation(() => ({
+vi.mock('../../../src/providers/adapters/codex', () => ({
+  CodexProvider: vi.fn().mockImplementation(() => ({
     name: 'codex',
     isAvailable: vi.fn(),
   })),
@@ -28,7 +28,7 @@ vi.mock('../../../src/providers/adapters/ollama', () => ({
   })),
 }));
 
-import { getProvider, ClaudeCodeProvider, AiderProvider, OpenAIProvider, OllamaProvider } from '../../../src/providers';
+import { getProvider, ClaudeCodeProvider, AiderProvider, CodexProvider, OllamaProvider } from '../../../src/providers';
 
 describe('providers/index', () => {
   beforeEach(() => {
@@ -86,7 +86,7 @@ describe('providers/index', () => {
     });
 
     it('should return codex provider when available', async () => {
-      vi.mocked(OpenAIProvider).mockImplementation(() => ({
+      vi.mocked(CodexProvider).mockImplementation(() => ({
         name: 'codex',
         isAvailable: vi.fn().mockResolvedValue(true),
         detect: vi.fn(),
@@ -101,7 +101,7 @@ describe('providers/index', () => {
     });
 
     it('should throw error when codex provider is not available', async () => {
-      vi.mocked(OpenAIProvider).mockImplementation(() => ({
+      vi.mocked(CodexProvider).mockImplementation(() => ({
         name: 'codex',
         isAvailable: vi.fn().mockResolvedValue(false),
         detect: vi.fn(),
@@ -160,8 +160,8 @@ describe('providers/index', () => {
       expect(AiderProvider).toBeDefined();
     });
 
-    it('should export OpenAIProvider', () => {
-      expect(OpenAIProvider).toBeDefined();
+    it('should export CodexProvider', () => {
+      expect(CodexProvider).toBeDefined();
     });
 
     it('should export OllamaProvider', () => {

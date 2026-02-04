@@ -7,6 +7,9 @@ import { z } from 'zod';
 export const BugSeverity = z.enum(['critical', 'high', 'medium', 'low']);
 export type BugSeverity = z.infer<typeof BugSeverity>;
 
+export const FindingKind = z.enum(['bug', 'smell']);
+export type FindingKind = z.infer<typeof FindingKind>;
+
 // 12 categories grouped into 4 families:
 // SECURITY: injection, auth-bypass, secrets-exposure
 // RELIABILITY: null-reference, boundary-error, resource-leak, async-issue
@@ -64,6 +67,7 @@ export const Bug = z.object({
   file: z.string(),
   line: z.number(),
   endLine: z.number().optional(),
+  kind: FindingKind.default('bug'),
   severity: BugSeverity,
   category: BugCategory,
   confidence: ConfidenceScore,
@@ -297,6 +301,8 @@ export const ScanResult = z.object({
     medium: z.number(),
     low: z.number(),
     total: z.number(),
+    bugs: z.number(),
+    smells: z.number(),
   }),
 });
 export type ScanResult = z.infer<typeof ScanResult>;

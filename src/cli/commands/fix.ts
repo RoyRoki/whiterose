@@ -165,6 +165,7 @@ function loadBugsFromSarif(sarifPath: string): Bug[] {
       file: r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'unknown',
       line: r.locations?.[0]?.physicalLocation?.region?.startLine || 0,
       endLine: r.locations?.[0]?.physicalLocation?.region?.endLine,
+      kind: props.kind || 'bug',
       severity: mapSarifLevel(r.level),
       category: props.category || 'logic-error',
       confidence: {
@@ -246,6 +247,7 @@ async function loadBugFromGitHub(issueUrl: string, cwd: string): Promise<Bug | n
       description: issue.body || issue.title,
       file: fileMatch?.[1] || '',
       line: parseInt(lineMatch?.[1] || '1', 10),
+      kind: 'bug',
       severity,
       category,
       confidence: {
@@ -361,6 +363,7 @@ async function collectManualBugDescription(cwd: string): Promise<Bug | null> {
     description: description || title || 'Manual bug',
     file: relativePath,
     line: parseInt(lineStr || '1', 10),
+    kind: 'bug',
     severity: severity as Bug['severity'],
     category: category as Bug['category'],
     confidence: {

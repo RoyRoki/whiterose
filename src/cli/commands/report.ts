@@ -54,6 +54,7 @@ export async function reportCommand(options: ReportOptions): Promise<void> {
     description: r.message?.markdown || r.message?.text || '',
     file: r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'unknown',
     line: r.locations?.[0]?.physicalLocation?.region?.startLine || 0,
+    kind: 'bug',
     severity: r.level === 'error' ? 'high' : r.level === 'warning' ? 'medium' : 'low',
     category: 'logic-error',
     confidence: { overall: 'high', codePathValidity: 0.9, reachability: 0.9, intentViolation: false, staticToolSignal: false, adversarialSurvived: true },
@@ -71,11 +72,13 @@ export async function reportCommand(options: ReportOptions): Promise<void> {
     duration: 0,
     bugs,
     summary: {
-      critical: bugs.filter((b) => b.severity === 'critical').length,
-      high: bugs.filter((b) => b.severity === 'high').length,
-      medium: bugs.filter((b) => b.severity === 'medium').length,
-      low: bugs.filter((b) => b.severity === 'low').length,
+      critical: bugs.filter((b) => b.kind === 'bug' && b.severity === 'critical').length,
+      high: bugs.filter((b) => b.kind === 'bug' && b.severity === 'high').length,
+      medium: bugs.filter((b) => b.kind === 'bug' && b.severity === 'medium').length,
+      low: bugs.filter((b) => b.kind === 'bug' && b.severity === 'low').length,
       total: bugs.length,
+      bugs: bugs.filter((b) => b.kind === 'bug').length,
+      smells: bugs.filter((b) => b.kind === 'smell').length,
     },
   };
 

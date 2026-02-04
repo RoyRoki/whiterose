@@ -34,6 +34,7 @@ interface CachedBug {
   description: string;
   category: string;
   severity: string;
+  kind?: string;
   suggestedFix?: string;
 }
 
@@ -156,6 +157,7 @@ export function setCachedResult(
     description: bug.description,
     category: bug.category,
     severity: bug.severity,
+    kind: bug.kind,
     suggestedFix: bug.suggestedFix,
   }));
 
@@ -187,6 +189,7 @@ export function expandCachedBugs(
     file: filePath,
     line: cachedBug.line,
     endLine: cachedBug.endLine,
+    kind: (cachedBug.kind as Bug['kind']) || 'bug',
     severity: cachedBug.severity as Bug['severity'],
     category: cachedBug.category as Bug['category'],
     confidence: {

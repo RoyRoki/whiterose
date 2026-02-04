@@ -363,6 +363,7 @@ export async function analyzeContracts(cwd: string): Promise<Bug[]> {
     description: v.description,
     file: relative(cwd, v.file),
     line: v.line,
+    kind: 'bug',
     severity: v.severity as Bug['severity'],
     category: 'logic-error' as Bug['category'],
     confidence: {

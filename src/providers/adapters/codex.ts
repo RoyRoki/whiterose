@@ -1,5 +1,19 @@
+/**
+ * OpenAI Codex CLI Provider
+ *
+ * Uses the OpenAI Codex CLI (`codex exec`) for non-interactive code analysis.
+ * Similar to how we wrap claude-code and aider.
+ *
+ * Configuration:
+ * - Codex CLI must be installed: npm install -g @openai/codex
+ * - Authentication via `codex auth` or CODEX_API_KEY environment variable
+ *
+ * @see https://developers.openai.com/codex/cli/
+ * @see https://developers.openai.com/codex/noninteractive/
+ */
+
 import { execa } from 'execa';
-import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from 'fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -19,17 +33,30 @@ import { generateBugId } from '../../core/utils.js';
 
 const MAX_FILE_SIZE = 50000;
 const MAX_TOTAL_CONTEXT = 200000;
-const AIDER_TIMEOUT = 300000;
+const CODEX_TIMEOUT = 300000; // 5 minutes
 
-export class AiderProvider implements LLMProvider {
-  name: ProviderType = 'aider';
+type ProgressCallback = (message: string) => void;
+
+export class CodexProvider implements LLMProvider {
+  name: ProviderType = 'codex';
+  private progressCallback?: ProgressCallback;
 
   async detect(): Promise<boolean> {
-    return isProviderAvailable('aider');
+    return isProviderAvailable('codex');
   }
 
   async isAvailable(): Promise<boolean> {
-    return isProviderAvailable('aider');
+    return isProviderAvailable('codex');
+  }
+
+  setProgressCallback(callback: ProgressCallback): void {
+    this.progressCallback = callback;
+  }
+
+  private reportProgress(message: string): void {
+    if (this.progressCallback) {
+      this.progressCallback(message);
+    }
   }
 
   async analyze(context: AnalysisContext): Promise<Bug[]> {
@@ -39,14 +66,16 @@ export class AiderProvider implements LLMProvider {
       return [];
     }
 
+    this.reportProgress(`Analyzing ${files.length} files with Codex...`);
+
     // Read file contents with size limits
     const fileContents = this.readFilesWithLimit(files, MAX_TOTAL_CONTEXT);
 
     // Build the analysis prompt
-    const prompt = this.buildAnalysisPrompt(fileContents, understanding, staticAnalysisResults);
+    const prompt = this.buildAnalysisPrompt(fileContents, understanding, staticAnalysisResults || []);
 
-    // Run aider with the prompt
-    const result = await this.runAider(prompt, files, dirname(files[0]));
+    // Run codex with the prompt
+    const result = await this.runCodex(prompt, dirname(files[0]));
 
     // Parse the response into bugs
     return this.parseAnalysisResponse(result, files);
@@ -67,7 +96,7 @@ export class AiderProvider implements LLMProvider {
     }
 
     const prompt = this.buildAdversarialPrompt(bug, fileContent);
-    const result = await this.runAider(prompt, [bug.file], dirname(bug.file));
+    const result = await this.runCodex(prompt, dirname(bug.file));
 
     return this.parseAdversarialResponse(result, bug);
   }
@@ -87,7 +116,7 @@ export class AiderProvider implements LLMProvider {
     }
 
     const prompt = this.buildUnderstandingPrompt(files.length, fileContents, packageJson);
-    const result = await this.runAider(prompt, sampledFiles.slice(0, 5), process.cwd());
+    const result = await this.runCodex(prompt, process.cwd());
 
     return this.parseUnderstandingResponse(result, files);
   }
@@ -163,7 +192,7 @@ export class AiderProvider implements LLMProvider {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Prompt Builders (similar to Claude Code but adapted for Aider)
+  // Prompt Builders
   // ─────────────────────────────────────────────────────────────
 
   private buildAnalysisPrompt(
@@ -183,38 +212,49 @@ export class AiderProvider implements LLMProvider {
             .join('\n')}`
         : '';
 
-    return `Analyze the following code for bugs. This is a ${understanding.summary.type} application using ${understanding.summary.framework || 'no specific framework'}.
+    return `You are a security auditor and bug hunter. Analyze the following code for bugs.
+
+This is a ${understanding.summary.type} application using ${understanding.summary.framework || 'no specific framework'}.
 
 ${filesSection}
 ${staticSignals}
 
 Find bugs in these categories:
-1. Logic errors (off-by-one, wrong operators)
+1. Logic errors (off-by-one, wrong operators, incorrect conditions)
 2. Null/undefined dereference
-3. Security vulnerabilities
+3. Security vulnerabilities (injection, auth bypass, data exposure)
 4. Async/race conditions
-5. Edge cases not handled
+5. Resource leaks
+6. Edge cases not handled
 
-Output as JSON array ONLY:
-[{"file": "path", "line": 42, "title": "Bug title", "description": "Description", "severity": "high", "category": "null-reference", "codePath": [{"step": 1, "file": "path", "line": 40, "code": "code", "explanation": "explanation"}], "evidence": ["evidence1"], "suggestedFix": "fix code"}]
+IMPORTANT: Output ONLY a JSON array with no other text:
+[{"file": "path/to/file.ts", "line": 42, "title": "Bug title", "description": "Detailed description", "severity": "critical|high|medium|low", "category": "null-reference|logic-error|injection|auth-bypass|async-issue|resource-leak", "codePath": [{"step": 1, "file": "path", "line": 40, "code": "code snippet", "explanation": "explanation"}], "evidence": ["evidence1", "evidence2"], "suggestedFix": "fix suggestion"}]
 
-If no bugs found, output: []`;
+If no bugs found, return: []`;
   }
 
   private buildAdversarialPrompt(bug: Bug, fileContent: string): string {
-    return `Try to DISPROVE this bug report:
+    return `You are a skeptical code reviewer. Challenge this bug report and determine if it's a real bug or a false positive.
 
-Bug: ${bug.title}
-File: ${bug.file}:${bug.line}
-Description: ${bug.description}
+BUG REPORT:
+- Title: ${bug.title}
+- Description: ${bug.description}
+- File: ${bug.file}:${bug.line}
+- Severity: ${bug.severity}
+- Category: ${bug.category}
 
 Code context:
 ${fileContent}
 
-Find reasons this is NOT a bug (guards, type checks, etc).
+Find reasons this is NOT a bug:
+- Are there guards or type checks that prevent this issue?
+- Is the code path actually reachable?
+- Are there runtime checks we might have missed?
 
-Output JSON ONLY:
-{"survived": true/false, "counterArguments": ["reason1", "reason2"], "confidence": "high/medium/low"}`;
+Output ONLY JSON with no other text:
+{"survived": true, "counterArguments": ["reason1", "reason2"], "confidence": "high|medium|low"}
+
+Set "survived" to true if the bug is real, false if it's likely a false positive.`;
   }
 
   private buildUnderstandingPrompt(
@@ -230,56 +270,62 @@ Output JSON ONLY:
       ? `\nDependencies: ${JSON.stringify((packageJson as any).dependencies || {})}`
       : '';
 
-    return `Analyze this codebase (${totalFiles} total files).
+    return `Analyze this codebase (${totalFiles} total files) and provide a structured understanding.
 ${depsSection}
 
 ${filesSection}
 
-Output JSON ONLY describing:
+Output ONLY JSON with no other text:
 {
-  "summary": {"type": "app-type", "framework": "framework", "language": "typescript", "description": "description"},
-  "features": [{"name": "Feature", "description": "desc", "priority": "critical", "constraints": ["constraint"], "relatedFiles": ["file"]}],
-  "contracts": [{"function": "funcName", "file": "file.ts", "inputs": [{"name": "param", "type": "string"}], "outputs": {"type": "Result"}, "invariants": ["rule"], "sideEffects": ["effect"]}]
+  "summary": {"type": "web-app|api|library|cli", "framework": "react|express|etc", "language": "typescript|javascript", "description": "brief description"},
+  "features": [{"name": "Feature", "description": "desc", "priority": "critical|high|medium|low", "constraints": ["constraint"], "relatedFiles": ["file"]}],
+  "contracts": [{"name": "Contract", "description": "what it guarantees", "type": "invariant|precondition|postcondition", "enforcementLevel": "critical|important|nice-to-have"}],
+  "dependencies": {"package": "version"}
 }`;
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Aider CLI Execution
+  // Codex CLI Execution
   // ─────────────────────────────────────────────────────────────
 
-  private async runAider(prompt: string, files: string[], cwd: string): Promise<string> {
-    // Create a temp file for the prompt
-    const tempDir = mkdtempSync(join(tmpdir(), 'whiterose-'));
-    const promptFile = join(tempDir, 'prompt.txt');
+  private async runCodex(prompt: string, cwd: string): Promise<string> {
+    // Create a temp directory for output
+    const tempDir = mkdtempSync(join(tmpdir(), 'whiterose-codex-'));
+    const outputFile = join(tempDir, 'output.txt');
 
     try {
-      writeFileSync(promptFile, prompt, 'utf-8');
+      // Use codex exec for non-interactive mode
+      // Pipe prompt via stdin with '-' argument
+      const codexCommand = getProviderCommand('codex');
 
-      // Run aider in no-auto-commits mode with message from file
       const args = [
-        '--no-auto-commits',
-        '--no-git',
-        '--yes',
-        '--message-file', promptFile,
+        'exec',
+        '--skip-git-repo-check', // We handle our own safety checks
+        '-o', outputFile, // Write final message to file
+        '-', // Read prompt from stdin
       ];
 
-      // Add files to analyze
-      for (const file of files.slice(0, 10)) {
-        if (existsSync(file)) {
-          args.push(file);
-        }
-      }
+      this.reportProgress('Running Codex analysis...');
 
-      const aiderCommand = getProviderCommand('aider');
-      const { stdout, stderr } = await execa(aiderCommand, args, {
+      const { stdout, stderr } = await execa(codexCommand, args, {
         cwd,
-        timeout: AIDER_TIMEOUT,
+        input: prompt,
+        timeout: CODEX_TIMEOUT,
         env: {
           ...process.env,
           NO_COLOR: '1',
         },
         reject: false,
       });
+
+      // Try to read from output file first
+      if (existsSync(outputFile)) {
+        try {
+          return readFileSync(outputFile, 'utf-8');
+        } catch {
+          // Fall through to stdout
+        }
+      }
 
       return stdout || stderr || '';
     } catch (error: any) {
@@ -288,10 +334,10 @@ Output JSON ONLY describing:
       }
 
       if (error.message?.includes('ENOENT')) {
-        throw new Error('Aider not found. Install it with: pip install aider-chat');
+        throw new Error('Codex not found. Install it with: npm install -g @openai/codex');
       }
 
-      throw new Error(`Aider failed: ${error.message}`);
+      throw new Error(`Codex failed: ${error.message}`);
     } finally {
       // Clean up temp files
       try {
@@ -394,63 +440,40 @@ Output JSON ONLY describing:
     }
   }
 
-  private parseUnderstandingResponse(
-    response: string,
-    files: string[]
-  ): CodebaseUnderstanding {
+  private parseUnderstandingResponse(response: string, files: string[]): CodebaseUnderstanding {
     try {
       const json = this.extractJson(response);
       if (!json) throw new Error('No JSON found');
 
       const parsed = JSON.parse(json);
 
-      let totalLines = 0;
-      for (const file of files.slice(0, 50)) {
-        try {
-          totalLines += readFileSync(file, 'utf-8').split('\n').length;
-        } catch {
-          // Skip
-        }
-      }
-
       return {
         version: '1',
         generatedAt: new Date().toISOString(),
         summary: {
           type: parsed.summary?.type || 'unknown',
+          description: parsed.summary?.description || '',
+          language: parsed.summary?.language || 'unknown',
           framework: parsed.summary?.framework,
-          language: parsed.summary?.language || 'typescript',
-          description: parsed.summary?.description || 'No description available',
         },
-        features: (parsed.features || []).map((f: any) => ({
-          name: f.name || 'Unknown',
-          description: f.description || '',
-          priority: f.priority || 'medium',
-          constraints: Array.isArray(f.constraints) ? f.constraints : [],
-          relatedFiles: Array.isArray(f.relatedFiles) ? f.relatedFiles : [],
-        })),
-        contracts: (parsed.contracts || []).map((c: any) => ({
-          function: c.function || 'unknown',
-          file: c.file || 'unknown',
-          inputs: Array.isArray(c.inputs) ? c.inputs : [],
-          outputs: c.outputs || { type: 'unknown' },
-          invariants: Array.isArray(c.invariants) ? c.invariants : [],
-          sideEffects: Array.isArray(c.sideEffects) ? c.sideEffects : [],
-        })),
-        dependencies: {},
+        features: parsed.features || [],
+        contracts: parsed.contracts || [],
+        dependencies: parsed.dependencies || {},
         structure: {
           totalFiles: files.length,
-          totalLines,
+          totalLines: 0,
+          packages: [],
         },
       };
     } catch {
+      // Return minimal understanding on parse failure
       return {
         version: '1',
         generatedAt: new Date().toISOString(),
         summary: {
           type: 'unknown',
-          language: 'typescript',
-          description: 'Failed to analyze codebase',
+          description: 'Failed to parse Codex response',
+          language: 'unknown',
         },
         features: [],
         contracts: [],
@@ -458,120 +481,58 @@ Output JSON ONLY describing:
         structure: {
           totalFiles: files.length,
           totalLines: 0,
+          packages: [],
         },
       };
     }
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Utilities
+  // Utility Methods
   // ─────────────────────────────────────────────────────────────
 
   private extractJson(text: string): string | null {
-    // Try code blocks first (most reliable)
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (codeBlockMatch) return codeBlockMatch[1].trim();
+    // Try to find JSON array or object in the response
+    const arrayMatch = text.match(/\[[\s\S]*\]/);
+    if (arrayMatch) return arrayMatch[0];
 
-    // Find balanced JSON using bracket counting (handles nested objects)
-    return this.findBalancedJson(text);
-  }
+    const objectMatch = text.match(/\{[\s\S]*\}/);
+    if (objectMatch) return objectMatch[0];
 
-  private findBalancedJson(text: string): string | null {
-    const objectStart = text.indexOf('{');
-    const arrayStart = text.indexOf('[');
-
-    let start = -1;
-    let openChar = '{';
-    let closeChar = '}';
-
-    if (objectStart === -1 && arrayStart === -1) return null;
-    if (objectStart === -1) {
-      start = arrayStart;
-      openChar = '[';
-      closeChar = ']';
-    } else if (arrayStart === -1) {
-      start = objectStart;
-    } else if (arrayStart < objectStart) {
-      start = arrayStart;
-      openChar = '[';
-      closeChar = ']';
-    } else {
-      start = objectStart;
-    }
-
-    let depth = 0;
-    let inString = false;
-    let escapeNext = false;
-
-    for (let i = start; i < text.length; i++) {
-      const char = text[i];
-      if (escapeNext) {
-        escapeNext = false;
-        continue;
-      }
-      if (char === '\\' && inString) {
-        escapeNext = true;
-        continue;
-      }
-      if (char === '"' && !escapeNext) {
-        inString = !inString;
-        continue;
-      }
-      if (inString) continue;
-      if (char === openChar) depth++;
-      else if (char === closeChar) {
-        depth--;
-        if (depth === 0) return text.slice(start, i + 1);
-      }
-    }
     return null;
   }
 
-  private parseSeverity(value: unknown): BugSeverity {
-    const str = String(value).toLowerCase();
-    if (['critical', 'high', 'medium', 'low'].includes(str)) {
-      return str as BugSeverity;
-    }
-    return 'medium';
+  private parseSeverity(value: any): BugSeverity {
+    const v = String(value).toLowerCase();
+    if (v === 'critical') return 'critical';
+    if (v === 'high') return 'high';
+    if (v === 'medium') return 'medium';
+    return 'low';
   }
 
-  private parseCategory(value: unknown): BugCategory {
-    const str = String(value).toLowerCase().replace(/_/g, '-');
+  private parseCategory(value: any): BugCategory {
+    const v = String(value).toLowerCase().replace(/[^a-z-]/g, '');
     const validCategories: BugCategory[] = [
-      // Security
-      'injection', 'auth-bypass', 'secrets-exposure',
-      // Reliability
-      'null-reference', 'boundary-error', 'resource-leak', 'async-issue',
-      // Correctness
-      'logic-error', 'data-validation', 'type-coercion',
-      // Design
-      'concurrency', 'intent-violation',
+      'injection',
+      'auth-bypass',
+      'secrets-exposure',
+      'null-reference',
+      'boundary-error',
+      'resource-leak',
+      'async-issue',
+      'logic-error',
+      'data-validation',
+      'type-coercion',
+      'concurrency',
+      'intent-violation',
     ];
-
-    if (validCategories.includes(str as BugCategory)) {
-      return str as BugCategory;
-    }
-
-    // Map common patterns to new categories
-    if (str.includes('null') || str.includes('undefined')) return 'null-reference';
-    if (str.includes('injection') || str.includes('xss') || str.includes('sql')) return 'injection';
-    if (str.includes('auth') || str.includes('permission') || str.includes('access')) return 'auth-bypass';
-    if (str.includes('secret') || str.includes('credential') || str.includes('password')) return 'secrets-exposure';
-    if (str.includes('async') || str.includes('race') || str.includes('await') || str.includes('promise')) return 'async-issue';
-    if (str.includes('boundary') || str.includes('index') || str.includes('overflow')) return 'boundary-error';
-    if (str.includes('leak') || str.includes('resource') || str.includes('memory')) return 'resource-leak';
-    if (str.includes('validation') || str.includes('sanitiz')) return 'data-validation';
-    if (str.includes('thread') || str.includes('concurrent') || str.includes('deadlock')) return 'concurrency';
-    if (str.includes('coercion') || str.includes('type')) return 'type-coercion';
-
-    return 'logic-error';
+    return validCategories.includes(v as BugCategory) ? (v as BugCategory) : 'logic-error';
   }
 
-  private parseConfidence(value: unknown): ConfidenceLevel {
-    const str = String(value).toLowerCase();
-    if (['high', 'medium', 'low'].includes(str)) {
-      return str as ConfidenceLevel;
-    }
+  private parseConfidence(value: any): ConfidenceLevel {
+    const v = String(value).toLowerCase();
+    if (v === 'high') return 'high';
+    if (v === 'low') return 'low';
     return 'medium';
   }
 }

@@ -17,23 +17,28 @@ interface MenuItem {
 export const Dashboard: React.FC<DashboardProps> = ({ bugs, onSelectCategory }) => {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
+  const verifiedBugs = bugs.filter((b) => b.kind === 'bug');
+  const smells = bugs.filter((b) => b.kind === 'smell');
+
   // Calculate summary
   const summary = {
-    critical: bugs.filter((b) => b.severity === 'critical').length,
-    high: bugs.filter((b) => b.severity === 'high').length,
-    medium: bugs.filter((b) => b.severity === 'medium').length,
-    low: bugs.filter((b) => b.severity === 'low').length,
+    critical: verifiedBugs.filter((b) => b.severity === 'critical').length,
+    high: verifiedBugs.filter((b) => b.severity === 'high').length,
+    medium: verifiedBugs.filter((b) => b.severity === 'medium').length,
+    low: verifiedBugs.filter((b) => b.severity === 'low').length,
   };
 
   // Calculate by category
   const byCategory: Record<string, number> = {};
-  for (const bug of bugs) {
+  for (const bug of verifiedBugs) {
     byCategory[bug.category] = (byCategory[bug.category] || 0) + 1;
   }
 
   // Build menu items
   const menuItems: MenuItem[] = [
-    { key: 'all', label: 'All Bugs', count: bugs.length, color: 'white' },
+    { key: 'all', label: 'All Findings', count: bugs.length, color: 'white' },
+    { key: 'kind:bug', label: 'Verified Bugs', count: verifiedBugs.length, color: 'white' },
+    { key: 'kind:smell', label: 'Smells', count: smells.length, color: 'gray' },
     { key: 'critical', label: 'Critical', count: summary.critical, color: 'red' },
     { key: 'high', label: 'High', count: summary.high, color: 'yellow' },
     { key: 'medium', label: 'Medium', count: summary.medium, color: 'blue' },
@@ -80,7 +85,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ bugs, onSelectCategory }) 
     return (
       <Box flexDirection="column" padding={1}>
         <Text color="green" bold>
-          ✓ No bugs found!
+          ✓ No findings found!
         </Text>
         <Text color="gray">Your codebase looks clean.</Text>
       </Box>

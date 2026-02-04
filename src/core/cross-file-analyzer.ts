@@ -435,6 +435,7 @@ export async function analyzeCrossFile(cwd: string): Promise<Bug[]> {
     description: cfb.description,
     file: cfb.involvedFiles[0],
     line: 1,
+    kind: 'bug',
     severity: cfb.severity as Bug['severity'],
     category: 'logic-error' as Bug['category'],
     confidence: {

@@ -24,7 +24,7 @@ interface SarifRule {
   shortDescription: { text: string };
   fullDescription: { text: string };
   defaultConfiguration: { level: string };
-  properties: { category: string };
+  properties: { category: string; kind?: string };
 }
 
 interface SarifResultItem {
@@ -33,6 +33,7 @@ interface SarifResultItem {
   message: { text: string; markdown?: string };
   locations: SarifLocation[];
   codeFlows?: SarifCodeFlow[];
+  properties?: Record<string, any>;
 }
 
 interface SarifLocation {
@@ -68,7 +69,7 @@ export function outputSarif(result: ScanResult): SarifResult {
         shortDescription: { text: getCategoryDescription(bug.category) },
         fullDescription: { text: getCategoryDescription(bug.category) },
         defaultConfiguration: { level: 'warning' },
-        properties: { category: bug.category },
+        properties: { category: bug.category, kind: bug.kind },
       });
     }
 
@@ -98,10 +99,10 @@ export function outputSarif(result: ScanResult): SarifResult {
 function bugToSarifResult(bug: Bug): SarifResultItem {
   const result: SarifResultItem = {
     ruleId: bug.id,
-    level: severityToLevel(bug.severity),
+    level: severityToLevel(bug),
     message: {
-      text: bug.title,
-      markdown: `**${bug.title}**\n\n${bug.description}\n\n**Evidence:**\n${bug.evidence.map((e) => `- ${e}`).join('\n')}`,
+      text: `${bug.kind === 'smell' ? '[SMELL] ' : ''}${bug.title}`,
+      markdown: `**${bug.title}**\n\n${bug.description}\n\n**Kind:** ${bug.kind}\n\n**Evidence:**\n${bug.evidence.map((e) => `- ${e}`).join('\n')}`,
     },
     locations: [
       {
@@ -111,6 +112,18 @@ function bugToSarifResult(bug: Bug): SarifResultItem {
         },
       },
     ],
+    properties: {
+      category: bug.category,
+      kind: bug.kind,
+      confidence: bug.confidence.overall,
+      codePathValidity: bug.confidence.codePathValidity,
+      reachability: bug.confidence.reachability,
+      intentViolation: bug.confidence.intentViolation,
+      staticToolSignal: bug.confidence.staticToolSignal,
+      adversarialSurvived: bug.confidence.adversarialSurvived,
+      evidence: bug.evidence,
+      suggestedFix: bug.suggestedFix,
+    },
   };
 
   // Add code flow if available
@@ -137,8 +150,9 @@ function bugToSarifResult(bug: Bug): SarifResultItem {
   return result;
 }
 
-function severityToLevel(severity: string): string {
-  switch (severity) {
+function severityToLevel(bug: Bug): string {
+  if (bug.kind === 'smell') return 'note';
+  switch (bug.severity) {
     case 'critical':
       return 'error';
     case 'high':

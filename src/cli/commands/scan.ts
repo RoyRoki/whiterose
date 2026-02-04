@@ -13,6 +13,7 @@ import { outputMarkdown } from '../../output/markdown.js';
 import { mergeBugs, getAccumulatedBugsStats } from '../../core/bug-merger.js';
 import { analyzeCrossFile } from '../../core/cross-file-analyzer.js';
 import { analyzeContracts } from '../../core/contract-analyzer.js';
+import { analyzeIntentContracts, classifyFindings } from '../../core/findings.js';
 import YAML from 'yaml';
 
 interface ScanOptions {
@@ -247,6 +248,20 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Intent validation (contract existence + intent alignment)
+  // ─────────────────────────────────────────────────────────────
+  if (!isQuickScan) {
+    try {
+      const intentBugs = analyzeIntentContracts(cwd, understanding);
+      if (intentBugs.length > 0) {
+        bugs.push(...intentBugs);
+      }
+    } catch {
+      // Skip on error
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Filter by confidence
   // ─────────────────────────────────────────────────────────────
   const confidenceOrder: Record<ConfidenceLevel, number> = { high: 3, medium: 2, low: 1 };
@@ -262,6 +277,11 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   if (options.category && options.category.length > 0) {
     bugs = bugs.filter((bug) => options.category!.includes(bug.category));
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // Classify findings (bug vs smell) using intent + evidence
+  // ─────────────────────────────────────────────────────────────
+  bugs = classifyFindings(bugs, cwd, understanding);
 
   // ─────────────────────────────────────────────────────────────
   // Assign IDs
@@ -299,11 +319,13 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     duration: 0, // TODO: track actual duration
     bugs: allBugs, // Use accumulated bugs (union across all scans)
     summary: {
-      critical: allBugs.filter((b) => b.severity === 'critical').length,
-      high: allBugs.filter((b) => b.severity === 'high').length,
-      medium: allBugs.filter((b) => b.severity === 'medium').length,
-      low: allBugs.filter((b) => b.severity === 'low').length,
+      critical: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'critical').length,
+      high: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'high').length,
+      medium: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'medium').length,
+      low: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'low').length,
       total: allBugs.length,
+      bugs: allBugs.filter((b) => b.kind === 'bug').length,
+      smells: allBugs.filter((b) => b.kind === 'smell').length,
     },
   };
 
@@ -323,13 +345,13 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     // JSON output (default for CI mode)
     console.log(JSON.stringify(result, null, 2));
     // CI mode: exit with code 1 if bugs found
-    if (options.ci && result.summary.total > 0) {
+    if (options.ci && result.summary.bugs > 0) {
       process.exit(1);
     }
   } else if (options.sarif) {
     console.log(JSON.stringify(outputSarif(result), null, 2));
     // CI mode: exit with code 1 if bugs found
-    if (options.ci && result.summary.total > 0) {
+    if (options.ci && result.summary.bugs > 0) {
       process.exit(1);
     }
   } else {
@@ -376,7 +398,10 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     if (newBugsThisScan > 0) {
       console.log(`  ${chalk.green('+')} New this scan: ${newBugsThisScan}`);
     }
-    console.log(`  ${chalk.bold('Total accumulated:')} ${result.summary.total} bugs`);
+    console.log(
+      `  ${chalk.bold('Total findings:')} ${result.summary.total} ` +
+      `(bugs: ${result.summary.bugs}, smells: ${result.summary.smells})`
+    );
     console.log();
 
     // Show saved files

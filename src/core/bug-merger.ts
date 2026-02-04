@@ -20,6 +20,7 @@ interface BugFingerprint {
   file: string;        // Relative file path
   functionName: string; // Extracted from title or code path
   category: string;     // Bug category
+  kind: string;         // Bug vs smell
   lineRange: string;    // Approximate line range (rounded to 10s)
 }
 
@@ -90,6 +91,7 @@ function createFingerprint(bug: Bug, cwd: string): BugFingerprint {
     file: relativeFile,
     functionName: extractFunctionName(bug),
     category: bug.category,
+    kind: bug.kind || 'bug',
     lineRange: `${Math.floor(bug.line / 10) * 10}-${Math.floor((bug.endLine || bug.line) / 10) * 10 + 10}`,
   };
 }
@@ -98,7 +100,7 @@ function createFingerprint(bug: Bug, cwd: string): BugFingerprint {
  * Hash a fingerprint to a string key
  */
 function hashFingerprint(fp: BugFingerprint): string {
-  return `${fp.file}::${fp.functionName}::${fp.category}::${fp.lineRange}`;
+  return `${fp.file}::${fp.functionName}::${fp.category}::${fp.kind}::${fp.lineRange}`;
 }
 
 /**
@@ -106,7 +108,7 @@ function hashFingerprint(fp: BugFingerprint): string {
  * (ignores line range for catching bugs that moved slightly)
  */
 function hashFingerprintLoose(fp: BugFingerprint): string {
-  return `${fp.file}::${fp.functionName}::${fp.category}`;
+  return `${fp.file}::${fp.functionName}::${fp.category}::${fp.kind}`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -150,6 +152,8 @@ export function loadAccumulatedBugs(cwd: string): StoredBugList {
       };
     }
 
+    // Normalize missing fields for backward compatibility
+    stored.bugs = stored.bugs.map((b) => ({ ...b, kind: b.kind || 'bug' }));
     return stored;
   } catch {
     return {
@@ -203,6 +207,7 @@ export function mergeBugs(
   const bugsToAdd: Bug[] = [];
 
   for (const bug of newBugs) {
+    bug.kind = bug.kind || 'bug';
     const fp = createFingerprint(bug, cwd);
     const strictHash = hashFingerprint(fp);
     const looseHash = hashFingerprintLoose(fp);

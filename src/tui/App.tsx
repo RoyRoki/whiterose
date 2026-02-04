@@ -44,7 +44,13 @@ export const App: React.FC<AppProps> = ({ bugs, config, fixOptions, onFix, onExi
 
   // Filter bugs based on selected category
   const filteredBugs = state.selectedCategory
-    ? state.bugs.filter((b) => b.category === state.selectedCategory || b.severity === state.selectedCategory)
+    ? state.bugs.filter((b) => {
+        if (state.selectedCategory?.startsWith('kind:')) {
+          const kind = state.selectedCategory.split(':')[1];
+          return b.kind === kind;
+        }
+        return b.category === state.selectedCategory || b.severity === state.selectedCategory;
+      })
     : state.bugs;
 
   const selectedBug = filteredBugs[state.selectedBugIndex];

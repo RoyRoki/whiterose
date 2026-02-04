@@ -54,6 +54,7 @@ export const PartialBugFromLLM = z.object({
   endLine: z.number().optional(),
   title: z.string(),
   description: z.string().optional().default(''),
+  kind: z.enum(['bug', 'smell']).optional().default('bug'),
   severity: BugSeverity.optional().default('medium'),
   category: BugCategory.optional().default('logic-error'),
   codePath: z.array(z.object({
