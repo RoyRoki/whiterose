@@ -1,8 +1,9 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import * as p from '@clack/prompts';
-import { existsSync } from 'fs';
-import { join, basename } from 'path';
+import { existsSync, readFileSync } from 'fs';
+import { join, basename, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { initCommand } from './commands/init.js';
 import { scanCommand } from './commands/scan.js';
 import { fixCommand } from './commands/fix.js';
@@ -12,6 +13,10 @@ import { reportCommand } from './commands/report.js';
 import { clearCommand } from './commands/clear.js';
 import { detectProvider } from '../providers/detect.js';
 import { ProviderType } from '../types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const pkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
 // Increase max listeners to avoid warning when spawning multiple child processes
 process.setMaxListeners(50);
@@ -32,7 +37,7 @@ const program = new Command();
 program
   .name('whiterose')
   .description('AI-powered bug hunter that uses your existing LLM subscription')
-  .version('0.2.7')
+  .version(pkg.version)
   .hook('preAction', () => {
     // Show banner only for main commands, not help
     const args = process.argv.slice(2);
