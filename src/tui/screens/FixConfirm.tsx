@@ -7,7 +7,7 @@ import { FixResultInfo } from '../types.js';
 interface FixConfirmProps {
   bug: Bug;
   dryRun: boolean;
-  onConfirm: () => Promise<FixResultInfo>;
+  onConfirm: (onProgress: (message: string) => void) => Promise<FixResultInfo>;
   onCancel: () => void;
   onFixComplete: () => void; // Called after user acknowledges success (or false positive)
 }
@@ -43,7 +43,10 @@ export const FixConfirm: React.FC<FixConfirmProps> = ({ bug, dryRun, onConfirm, 
       setStatus('fixing');
       setProgressMessage('Starting agentic fix...');
       try {
-        const result = await onConfirm();
+        const result = await onConfirm((message) => {
+          // Update progress message with streaming output from the LLM
+          setProgressMessage(message);
+        });
         if (result.falsePositive) {
           setFalsePositiveReason(result.falsePositiveReason || 'The AI determined this bug is not real after analyzing the code.');
           setStatus('false-positive');

@@ -17,8 +17,8 @@ export async function startFixTUI(
   cwd?: string
 ): Promise<void> {
   return new Promise((resolve) => {
-    const handleFix = async (bug: Bug): Promise<FixResultInfo> => {
-      const result = await applyFix(bug, config, options);
+    const handleFix = async (bug: Bug, onProgress?: (message: string) => void): Promise<FixResultInfo> => {
+      const result = await applyFix(bug, config, { ...options, onProgress });
 
       // Handle false positive - return info so UI can show it
       if (result.falsePositive) {

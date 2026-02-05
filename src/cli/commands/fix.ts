@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, resolve, isAbsolute } from 'path';
 import { execa } from 'execa';
-import { Bug, ProviderType } from '../../types.js';
+import { Bug, ProviderType, BugCategory, ConfidenceLevel, FindingKind } from '../../types.js';
 import { loadConfig } from '../../core/config.js';
 import { startFixTUI } from '../../tui/index.js';
 import { applyFix, sanitizeSarifText, sanitizeSarifEvidence, sanitizeSarifCodePath } from '../../core/fixer.js';
@@ -266,6 +266,12 @@ function loadBugsFromSarif(sarifPath: string): Bug[] {
     const rawId = r.ruleId;
     const id = typeof rawId === 'string' ? rawId : `WR-${String(i + 1).padStart(3, '0')}`;
 
+    // SECURITY: Validate enum fields against allowed values to prevent injection via props
+    // These fields are embedded into the agentic prompt and must be validated
+    const validatedKind = FindingKind.safeParse(props.kind);
+    const validatedCategory = BugCategory.safeParse(props.category);
+    const validatedConfidence = ConfidenceLevel.safeParse(props.confidence);
+
     return {
       id,
       title: sanitizeSarifText(String(rawTitle), 'title'),
@@ -273,11 +279,11 @@ function loadBugsFromSarif(sarifPath: string): Bug[] {
       file,
       line,
       endLine,
-      kind: props.kind || 'bug',
+      kind: validatedKind.success ? validatedKind.data : 'bug',
       severity: mapSarifLevel(r.level),
-      category: props.category || 'logic-error',
+      category: validatedCategory.success ? validatedCategory.data : 'logic-error',
       confidence: {
-        overall: props.confidence || 'medium',
+        overall: validatedConfidence.success ? validatedConfidence.data : 'medium',
         codePathValidity: typeof props.codePathValidity === 'number' ? props.codePathValidity : 0.8,
         reachability: typeof props.reachability === 'number' ? props.reachability : 0.8,
         intentViolation: typeof props.intentViolation === 'boolean' ? props.intentViolation : false,
@@ -591,14 +597,33 @@ async function fixSingleBug(bug: Bug, config: any, options: FixOptions, cwd?: st
   }
 
   // Apply fix
-  const spinner = p.spinner();
-  spinner.start(options.dryRun ? 'Generating fix preview...' : 'Applying fix...');
+  console.log();
+  console.log(chalk.cyan('  ◆ Starting agentic fix...'));
+  console.log();
 
   try {
-    const result = await applyFix(bug, config, options);
+    // Track last message to avoid duplicates
+    let lastMessage = '';
+
+    // Pass onProgress callback to show streaming updates from the LLM
+    const result = await applyFix(bug, config, {
+      ...options,
+      onProgress: (message) => {
+        // Only show if message is different from last (avoid spam)
+        if (message !== lastMessage) {
+          lastMessage = message;
+          // Clear line and show new message (truncate to terminal width)
+          const truncated = message.length > 72 ? message.substring(0, 72) + '...' : message;
+          process.stdout.write(`\r\x1b[K  ${chalk.dim('›')} ${chalk.gray(truncated)}`);
+        }
+      },
+    });
+
+    // Clear the progress line and show success
+    process.stdout.write('\r\x1b[K');
 
     if (result.success) {
-      spinner.stop(options.dryRun ? 'Fix preview generated' : 'Fix applied');
+      console.log(chalk.green('  ✓ Fix applied successfully'));
 
       if (result.diff) {
         console.log();
@@ -629,12 +654,12 @@ async function fixSingleBug(bug: Bug, config: any, options: FixOptions, cwd?: st
 
       p.outro(chalk.green('Fix complete!'));
     } else {
-      spinner.stop('Fix failed');
+      console.log(chalk.red('  ✗ Fix failed'));
       p.log.error(result.error || 'Unknown error');
       process.exit(1);
     }
   } catch (error: any) {
-    spinner.stop('Fix failed');
+    console.log(chalk.red('  ✗ Fix failed'));
     p.log.error(error.message);
     process.exit(1);
   }

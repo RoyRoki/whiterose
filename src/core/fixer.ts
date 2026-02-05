@@ -8,6 +8,123 @@ import { getProviderCommand } from '../providers/detect.js';
 import { markBugAsFixed } from './bug-status.js';
 
 /**
+ * Maximum length for untrusted SARIF text fields to prevent prompt bloat attacks.
+ */
+const MAX_SARIF_TEXT_LENGTH = 2000;
+
+/**
+ * Patterns that indicate prompt injection attempts in SARIF content.
+ * These patterns try to break out of the bug context and inject new instructions.
+ */
+const PROMPT_INJECTION_PATTERNS = [
+  // Attempts to override or ignore instructions
+  /ignore\s+(previous|all|above)\s+instructions?/i,
+  /disregard\s+(previous|all|above)\s+instructions?/i,
+  /forget\s+(previous|all|above)\s+instructions?/i,
+  // Attempts to define new roles or personas
+  /you\s+are\s+(now|actually)\s+/i,
+  /act\s+as\s+(a|an)\s+/i,
+  /pretend\s+(you|to\s+be)\s+/i,
+  // Attempts to inject system-level commands
+  /\[SYSTEM\]/i,
+  /\[INST\]/i,
+  /<\|system\|>/i,
+  /<\|assistant\|>/i,
+  /<\|user\|>/i,
+  // Attempts to break out with special markers
+  /###\s*(INSTRUCTION|SYSTEM|END|NEW)/i,
+  /```\s*(system|instruction)/i,
+  // Direct file operation injections
+  /delete\s+(all|the)\s+files?/i,
+  /rm\s+-rf\s+/i,
+  /remove\s+(all|every)\s+file/i,
+  // Exfiltration attempts
+  /send\s+(this|the|all)\s+(data|content|file)/i,
+  /upload\s+(to|this)/i,
+  /curl\s+.*\s+-d/i,
+  /fetch\s*\(\s*['"][^'"]*['"]\s*,\s*\{[^}]*method\s*:\s*['"]POST['"]/i,
+];
+
+/**
+ * Sanitizes untrusted text from SARIF files to prevent prompt injection.
+ *
+ * This function:
+ * 1. Truncates overly long text to prevent prompt bloat
+ * 2. Detects and neutralizes prompt injection patterns
+ * 3. Escapes special characters that could break prompt structure
+ *
+ * @param text - Untrusted text from SARIF file
+ * @param fieldName - Name of the field for error reporting
+ * @returns Sanitized text safe for prompt embedding
+ */
+export function sanitizeSarifText(text: string, fieldName: string = 'field'): string {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+
+  // Truncate overly long text
+  let sanitized = text.length > MAX_SARIF_TEXT_LENGTH
+    ? text.substring(0, MAX_SARIF_TEXT_LENGTH) + `... [truncated ${fieldName}]`
+    : text;
+
+  // Check for prompt injection patterns
+  for (const pattern of PROMPT_INJECTION_PATTERNS) {
+    if (pattern.test(sanitized)) {
+      // Replace the suspicious content with a safe placeholder
+      sanitized = sanitized.replace(pattern, '[REDACTED: potential injection]');
+    }
+  }
+
+  // Escape characters that could break prompt structure
+  // Replace markdown-style code blocks that might confuse the LLM
+  sanitized = sanitized.replace(/```+/g, '`\u200B`\u200B`'); // Insert zero-width spaces
+
+  // Escape sequences that look like special markers
+  sanitized = sanitized.replace(/###/g, '#\u200B#\u200B#');
+
+  return sanitized;
+}
+
+/**
+ * Sanitizes an array of evidence strings from SARIF.
+ */
+export function sanitizeSarifEvidence(evidence: unknown): string[] {
+  if (!Array.isArray(evidence)) {
+    return [];
+  }
+
+  return evidence
+    .filter((e): e is string => typeof e === 'string')
+    .slice(0, 10) // Limit number of evidence items
+    .map((e) => sanitizeSarifText(e, 'evidence'));
+}
+
+/**
+ * Sanitizes code path entries from SARIF.
+ */
+export function sanitizeSarifCodePath(codePath: unknown): Array<{
+  step: number;
+  file: string;
+  line: number;
+  code: string;
+  explanation: string;
+}> {
+  if (!Array.isArray(codePath)) {
+    return [];
+  }
+
+  return codePath
+    .slice(0, 20) // Limit number of code path entries
+    .map((entry, idx) => ({
+      step: typeof entry?.step === 'number' ? entry.step : idx + 1,
+      file: sanitizeSarifText(String(entry?.file || ''), 'codePath.file').substring(0, 500),
+      line: typeof entry?.line === 'number' ? entry.line : 0,
+      code: sanitizeSarifText(String(entry?.code || ''), 'codePath.code'),
+      explanation: sanitizeSarifText(String(entry?.explanation || ''), 'codePath.explanation'),
+    }));
+}
+
+/**
  * Validates that a file path is within the project directory.
  * Prevents path traversal attacks from malicious bug.file values.
  */
@@ -55,6 +172,7 @@ function validateFilePath(filePath: string, projectDir: string): string {
 interface FixOptions {
   dryRun: boolean;
   branch?: string;
+  onProgress?: (message: string) => void;
 }
 
 interface FixResult {
@@ -131,7 +249,7 @@ export async function applyFix(
   // Run the agentic fix
   let agenticResult: AgenticResult;
   try {
-    agenticResult = await runAgenticFix(bug, config, projectDir);
+    agenticResult = await runAgenticFix(bug, config, projectDir, options.onProgress);
   } catch (error: any) {
     return {
       success: false,
@@ -197,7 +315,8 @@ interface AgenticResult {
 async function runAgenticFix(
   bug: Bug,
   config: WhiteroseConfig,
-  projectDir: string
+  projectDir: string,
+  onProgress?: (message: string) => void
 ): Promise<AgenticResult> {
   const providerCommand = getProviderCommand(config.provider);
   const prompt = buildAgenticFixPrompt(bug);
@@ -260,10 +379,15 @@ async function runAgenticFix(
     } else if (config.provider === 'claude-code') {
       // Claude Code: pass prompt via stdin for reliability (avoids shell escaping and arg length issues)
       // The --dangerously-skip-permissions flag allows edits without prompts
-      // When -p is used without a positional prompt argument, Claude Code reads from stdin
-      const result = await execa(
+      // Use --output-format stream-json for real-time progress streaming (requires --verbose)
+      const args = ['--dangerously-skip-permissions', '-p'];
+      if (onProgress) {
+        args.push('--verbose', '--output-format', 'stream-json');
+      }
+
+      const subprocess = execa(
         providerCommand,
-        ['--dangerously-skip-permissions', '-p'],
+        args,
         {
           cwd: projectDir,
           input: prompt, // Pass prompt via stdin (Claude reads from stdin when no prompt arg provided)
@@ -273,6 +397,49 @@ async function runAgenticFix(
           cancelSignal: controller.signal,
         }
       );
+
+      // Stream stdout in real-time if progress callback is provided
+      if (onProgress && subprocess.stdout) {
+        let lineBuffer = '';
+        subprocess.stdout.on('data', (chunk: Buffer) => {
+          const text = chunk.toString();
+          lineBuffer += text;
+          // Process complete lines (stream-json outputs one JSON object per line)
+          const lines = lineBuffer.split('\n');
+          lineBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed) {
+              try {
+                const event = JSON.parse(trimmed);
+                // Extract meaningful progress messages from stream-json events
+                if (event.type === 'assistant' && event.message?.content) {
+                  for (const block of event.message.content) {
+                    if (block.type === 'tool_use') {
+                      // Show tool usage (e.g., "Reading file...", "Editing file...")
+                      const toolName = block.name || 'tool';
+                      onProgress(`Using ${toolName}...`);
+                    } else if (block.type === 'text' && block.text) {
+                      // Show text snippets (first 80 chars)
+                      const preview = block.text.substring(0, 80).replace(/\n/g, ' ').trim();
+                      if (preview) {
+                        onProgress(preview + (block.text.length > 80 ? '...' : ''));
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // Not JSON or parsing failed, show raw line if meaningful
+                if (trimmed.length > 3 && trimmed.length < 100) {
+                  onProgress(trimmed);
+                }
+              }
+            }
+          }
+        });
+      }
+
+      const result = await subprocess;
       stdout = result.stdout || '';
       stderr = result.stderr || '';
     } else if (config.provider === 'gemini') {

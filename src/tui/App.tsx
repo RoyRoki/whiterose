@@ -29,7 +29,7 @@ interface AppProps {
     dryRun: boolean;
     branch?: string;
   };
-  onFix: (bug: Bug) => Promise<FixResultInfo>;
+  onFix: (bug: Bug, onProgress?: (message: string) => void) => Promise<FixResultInfo>;
   onExit: () => void;
 }
 
@@ -102,11 +102,11 @@ export const App: React.FC<AppProps> = ({ bugs, config, fixOptions, onFix, onExi
   const [lastFixedBugId, setLastFixedBugId] = useState<string | null>(null);
 
   // Called when user confirms fix - does the fix and returns result info
-  const handleConfirmFix = async (): Promise<FixResultInfo> => {
+  const handleConfirmFix = async (onProgress: (message: string) => void): Promise<FixResultInfo> => {
     if (selectedBug) {
       setFixError(null);
       setLastFixedBugId(selectedBug.id);
-      const result = await onFix(selectedBug);
+      const result = await onFix(selectedBug, onProgress);
       // Don't change state here - let FixConfirm show success/false-positive first
       return result;
     }
