@@ -5,6 +5,10 @@ vi.mock('fs', () => ({
   existsSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
+  statSync: vi.fn().mockReturnValue({ mtime: { getTime: () => Date.now() } }),
+  realpathSync: vi.fn((p: string) => p),
+  mkdtempSync: vi.fn().mockReturnValue('/tmp/whiterose-test'),
+  rmSync: vi.fn(),
 }));
 
 vi.mock('execa', () => ({
@@ -16,7 +20,7 @@ vi.mock('../../../src/core/git', () => ({
   commitFix: vi.fn(),
 }));
 
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execa } from 'execa';
 import { createFixBranch, commitFix } from '../../../src/core/git';
 import { applyFix, batchFix } from '../../../src/core/fixer';
@@ -25,6 +29,11 @@ import { Bug, WhiteroseConfig } from '../../../src/types';
 // Mock process.cwd to return /project for path validation
 const originalCwd = process.cwd;
 vi.spyOn(process, 'cwd').mockReturnValue('/project');
+
+// Set up default mock behaviors
+const mockMtime = { getTime: () => Date.now() };
+vi.mocked(statSync).mockReturnValue({ mtime: mockMtime } as any);
+vi.mocked(realpathSync).mockImplementation((p: any) => p as string);
 
 const mockBug: Bug = {
   id: 'WR-001',
@@ -75,6 +84,9 @@ describe('core/fixer', () => {
     vi.clearAllMocks();
     // Re-set cwd mock after clearAllMocks
     vi.spyOn(process, 'cwd').mockReturnValue('/project');
+    // Re-set fs mocks after clearAllMocks
+    vi.mocked(statSync).mockReturnValue({ mtime: { getTime: () => Date.now() } } as any);
+    vi.mocked(realpathSync).mockImplementation((p: any) => p as string);
   });
 
   afterEach(() => {

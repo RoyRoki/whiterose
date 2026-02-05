@@ -17,7 +17,7 @@ vi.mock('../../../src/core/dependencies', () => ({
 
 import fg from 'fast-glob';
 import { readFileSync, existsSync, writeFileSync } from 'fs';
-import { scanCodebase, getDependentFiles, hashFile, getChangedFiles } from '../../../src/core/scanner';
+import { scanCodebase, getDependentFiles, hashFile, getChangedFiles } from '../../../src/core/scanner/index';
 import { getDependentFiles as mockGetDepGraphDependents } from '../../../src/core/dependencies';
 
 describe('core/scanner', () => {

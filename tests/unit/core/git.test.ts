@@ -170,7 +170,7 @@ describe('core/git', () => {
       expect(result).toBe('abc123');
       expect(execa).toHaveBeenCalledWith(
         'git',
-        ['add', 'src/test.ts'],
+        ['add', '--', 'src/test.ts'],
         expect.any(Object)
       );
     });

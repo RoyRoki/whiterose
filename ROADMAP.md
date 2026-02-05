@@ -23,7 +23,11 @@ whiterose aims to be the most effective AI-powered static analysis tool that und
 
 ### LLM Providers
 - [x] **claude-code** - Anthropic's Claude Code CLI
+- [x] **codex** - OpenAI Codex CLI
+- [x] **gemini** - Google Gemini CLI
 - [x] **aider** - AI pair programming tool
+- [x] **ollama** - Local LLMs via Ollama
+- [x] **opencode** - OpenCode AI CLI
 
 ### Language Support
 - [x] TypeScript / JavaScript
@@ -91,7 +95,8 @@ whiterose aims to be the most effective AI-powered static analysis tool that und
 ### Direct API Support
 - [ ] Claude API (Anthropic) with own API key
 - [ ] OpenAI API (GPT-4) with own API key
-- [ ] Local LLMs (Ollama, llama.cpp)
+- [x] Local LLMs (Ollama) - Already supported via ollama executor
+- [ ] Local LLMs (llama.cpp direct)
 - [ ] Custom endpoint support
 
 ### Agent Capabilities

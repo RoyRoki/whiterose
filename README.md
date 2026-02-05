@@ -72,6 +72,7 @@ You need at least one LLM CLI tool installed:
 | Codex | `npm install -g @openai/codex` | ✅ Ready |
 | Gemini | `npm install -g @google/gemini-cli` | ✅ Ready |
 | Aider | `pip install aider-chat` | ✅ Ready |
+| OpenCode | `curl -fsSL https://opencode.ai/install \| bash` | ✅ Ready |
 
 ---
 
@@ -334,13 +335,13 @@ whiterose follows the **Liskov Substitution Principle** - all providers are inte
 │      Promise<PromptResult>;                                     │
 │  }                                                              │
 └─────────────────────────────────────────────────────────────────┘
-         │              │              │              │
-         ▼              ▼              ▼              ▼
-   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-   │ claude   │  │  codex   │  │  gemini  │  │  aider   │
-   │  -code   │  │          │  │          │  │          │
-   └──────────┘  └──────────┘  └──────────┘  └──────────┘
-   executors/    executors/    executors/    executors/
+         │              │              │              │              │
+         ▼              ▼              ▼              ▼              ▼
+   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+   │ claude   │  │  codex   │  │  gemini  │  │  aider   │  │ opencode │
+   │  -code   │  │          │  │          │  │          │  │          │
+   └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
+   executors/    executors/    executors/    executors/    executors/
 ```
 
 **Adding a new provider is trivial** - just implement the `PromptExecutor` interface (~30 lines).
@@ -494,7 +495,8 @@ whiterose/
 │   │   │   ├── claude-code.ts    # ClaudeCodeExecutor
 │   │   │   ├── codex.ts          # CodexExecutor
 │   │   │   ├── gemini.ts         # GeminiExecutor
-│   │   │   └── aider.ts          # AiderExecutor
+│   │   │   ├── aider.ts          # AiderExecutor
+│   │   │   └── opencode.ts       # OpenCodeExecutor
 │   │   │
 │   │   ├── prompts/
 │   │   │   ├── multipass-prompts.ts    # Unit pass prompts
