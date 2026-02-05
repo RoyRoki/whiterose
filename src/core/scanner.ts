@@ -89,6 +89,7 @@ export class CoreScanner {
   private executor: PromptExecutor;
   private config: ScannerConfig;
   private progress: ScanProgress;
+  private passErrors: Array<{ passName: string; error: string }> = [];
 
   constructor(
     executor: PromptExecutor,
@@ -98,6 +99,21 @@ export class CoreScanner {
     this.executor = executor;
     this.config = { ...DEFAULT_SCANNER_CONFIG, ...config };
     this.progress = progress;
+  }
+
+  /**
+   * Get errors that occurred during the last scan.
+   * Returns an array of pass names and their error messages.
+   */
+  getPassErrors(): Array<{ passName: string; error: string }> {
+    return this.passErrors;
+  }
+
+  /**
+   * Check if any passes failed during the last scan.
+   */
+  hasPassErrors(): boolean {
+    return this.passErrors.length > 0;
   }
 
   /**
@@ -113,6 +129,9 @@ export class CoreScanner {
   async scan(context: ScanContext): Promise<Bug[]> {
     const cwd = process.cwd();
     const startTime = Date.now();
+
+    // Reset pass errors for this scan
+    this.passErrors = [];
 
     // Get all passes from the pipeline
     const pipeline = getFullAnalysisPipeline();
@@ -235,8 +254,11 @@ export class CoreScanner {
 
           return bugs;
         } catch (error: any) {
-          this.progress.onPassError?.(pass.name, error.message);
-          this.report(`    ✗ ${pass.name}: ${error.message}`);
+          const errorMsg = error.message || String(error);
+          this.progress.onPassError?.(pass.name, errorMsg);
+          this.report(`    ✗ ${pass.name}: ${errorMsg}`);
+          // Track the error so callers can detect failed passes
+          this.passErrors.push({ passName: pass.name, error: errorMsg });
           return [];
         }
       });
@@ -264,6 +286,9 @@ export class CoreScanner {
   async quickScan(context: ScanContext): Promise<Bug[]> {
     const cwd = process.cwd();
 
+    // Reset pass errors for this scan
+    this.passErrors = [];
+
     this.report(`\n════ QUICK SCAN ════`);
     this.report(`  Provider: ${this.executor.name}`);
 
@@ -280,7 +305,10 @@ export class CoreScanner {
 
       return bugs;
     } catch (error: any) {
-      this.report(`  Error: ${error.message}`);
+      const errorMsg = error.message || String(error);
+      this.report(`  Error: ${errorMsg}`);
+      // Track the error so callers can detect failed passes
+      this.passErrors.push({ passName: 'quick-scan', error: errorMsg });
       return [];
     }
   }
