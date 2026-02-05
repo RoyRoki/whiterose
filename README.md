@@ -1,6 +1,8 @@
 # whiterose
 
 [![npm version](https://img.shields.io/npm/v/@shakecodeslikecray/whiterose.svg)](https://www.npmjs.com/package/@shakecodeslikecray/whiterose)
+[![npm downloads](https://img.shields.io/npm/dw/@shakecodeslikecray/whiterose.svg)](https://www.npmjs.com/package/@shakecodeslikecray/whiterose)
+[![GitHub stars](https://img.shields.io/github/stars/shakecodeslikecray/whiterose?style=social)](https://github.com/shakecodeslikecray/whiterose)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20NC%201.0-blue.svg)](LICENSE)
 
 > "I've been staring at your code for a long time."
@@ -33,6 +35,7 @@ AI-powered bug hunter that uses your existing LLM subscription. No API keys need
 - [Bug Categories](#bug-categories)
 - [Output Formats](#output-formats)
 - [Contributing](#contributing)
+- [Show Your Support](#show-your-support)
 - [License](#license)
 
 ---
@@ -586,6 +589,18 @@ npm test         # Run tests
 - **Transparency**: Shows exactly what's happening in real-time.
 - **Grounded**: Every bug must have evidence and a code path trace.
 - **Zero Cost**: Uses your existing LLM subscription.
+
+---
+
+## Show Your Support
+
+If you're using whiterose, we'd love to know!
+
+- **Star this repo** - helps others discover the project
+- **Add the `whiterose` topic** to your repo - [browse repos using whiterose](https://github.com/topics/whiterose)
+- **Share your experience** - [open a discussion](https://github.com/shakecodeslikecray/whiterose/discussions)
+
+[![Add whiterose topic](https://img.shields.io/badge/Add%20Topic-whiterose-red?style=for-the-badge)](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/classifying-your-repository-with-topics)
 
 ---
 
