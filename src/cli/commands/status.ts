@@ -1,10 +1,30 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
-import { join } from 'path';
+import { join, basename } from 'path';
 import { loadConfig, loadUnderstanding } from '../../core/config.js';
 import { detectProvider } from '../../providers/detect.js';
 import { getAccumulatedBugsStats } from '../../core/bug-merger.js';
+import { ScanResult } from '../../types.js';
+import { renderScanCard, renderStatusCard, CardData } from '../components/card.js';
+import { formatDuration } from '../components/progress.js';
+
+/**
+ * Get repository name from git or directory name
+ */
+function getRepoName(cwd: string): string {
+  try {
+    const gitConfigPath = join(cwd, '.git', 'config');
+    if (existsSync(gitConfigPath)) {
+      const config = readFileSync(gitConfigPath, 'utf-8');
+      const match = config.match(/url\s*=\s*.*[/:]([^/]+?)(?:\.git)?$/m);
+      if (match) return match[1];
+    }
+  } catch {
+    // Fall through to basename
+  }
+  return basename(cwd);
+}
 
 export async function statusCommand(): Promise<void> {
   const cwd = process.cwd();
@@ -17,29 +37,70 @@ export async function statusCommand(): Promise<void> {
     process.exit(1);
   }
 
-  p.intro(chalk.red('whiterose') + chalk.dim(' - status'));
+  console.log();
+  console.log(chalk.red.bold('whiterose') + chalk.dim(' status'));
+  console.log();
 
   // Load config
   const config = await loadConfig(cwd);
-  const understanding = await loadUnderstanding(cwd);
+  const repoName = getRepoName(cwd);
+
+  // Try to load last scan result for the card
+  const lastScanPath = join(whiterosePath, 'last-scan.json');
+  let lastScan: ScanResult | null = null;
+
+  if (existsSync(lastScanPath)) {
+    try {
+      lastScan = JSON.parse(readFileSync(lastScanPath, 'utf-8')) as ScanResult;
+    } catch {
+      // Corrupted file, ignore
+    }
+  }
+
+  // Show the card if we have a recent scan
+  if (lastScan && lastScan.meta) {
+    const cardData: CardData = {
+      meta: lastScan.meta,
+      bugs: lastScan.summary.bugs,
+      smells: lastScan.summary.smells,
+      reportPath: './whiterose-output/bugs-human.md',
+    };
+    console.log(renderScanCard(cardData));
+    console.log();
+    console.log(chalk.dim(`Last scan: ${new Date(lastScan.timestamp).toLocaleString()}`));
+  } else {
+    // Show minimal status card
+    const bugStats = getAccumulatedBugsStats(cwd);
+    const totalBugs = bugStats.bySeverity ? Object.values(bugStats.bySeverity).reduce((a, b) => a + b, 0) : 0;
+
+    console.log(renderStatusCard(
+      repoName,
+      config.provider,
+      totalBugs,
+      0, // No smell tracking in accumulated bugs
+      bugStats.lastUpdated ? new Date(bugStats.lastUpdated).toLocaleDateString() : undefined
+    ));
+  }
+
+  console.log();
 
   // Detect available providers
   const availableProviders = await detectProvider();
 
-  console.log();
-  console.log(chalk.bold('  Configuration'));
-  console.log(`  ${chalk.dim('Provider:')} ${config.provider}`);
-  console.log(`  ${chalk.dim('Available:')} ${availableProviders.join(', ') || 'none'}`);
+  console.log(chalk.dim('Configuration'));
+  console.log(`  Provider:  ${config.provider}`);
+  console.log(`  Available: ${availableProviders.join(', ') || 'none'}`);
   console.log();
 
+  // Load understanding if available
+  const understanding = await loadUnderstanding(cwd);
   if (understanding) {
-    console.log(chalk.bold('  Codebase Understanding'));
-    console.log(`  ${chalk.dim('Type:')} ${understanding.summary.type}`);
-    console.log(`  ${chalk.dim('Framework:')} ${understanding.summary.framework || 'none'}`);
-    console.log(`  ${chalk.dim('Files:')} ${understanding.structure.totalFiles}`);
-    console.log(`  ${chalk.dim('Features:')} ${understanding.features.length}`);
-    console.log(`  ${chalk.dim('Contracts:')} ${understanding.contracts.length}`);
-    console.log(`  ${chalk.dim('Generated:')} ${understanding.generatedAt}`);
+    console.log(chalk.dim('Codebase'));
+    console.log(`  Type:      ${understanding.summary.type}`);
+    console.log(`  Framework: ${understanding.summary.framework || 'none'}`);
+    console.log(`  Files:     ${understanding.structure.totalFiles}`);
+    console.log(`  Features:  ${understanding.features.length}`);
+    console.log(`  Contracts: ${understanding.contracts.length}`);
     console.log();
   }
 
@@ -48,49 +109,21 @@ export async function statusCommand(): Promise<void> {
   if (existsSync(hashesPath)) {
     try {
       const hashes = JSON.parse(readFileSync(hashesPath, 'utf-8'));
-      console.log(chalk.bold('  Cache'));
-      console.log(`  ${chalk.dim('Files tracked:')} ${hashes.fileHashes?.length || 0}`);
-      console.log(`  ${chalk.dim('Last full scan:')} ${hashes.lastFullScan || 'never'}`);
+      console.log(chalk.dim('Cache'));
+      console.log(`  Files tracked: ${hashes.fileHashes?.length || 0}`);
+      console.log(`  Last full:     ${hashes.lastFullScan ? new Date(hashes.lastFullScan).toLocaleDateString() : 'never'}`);
       console.log();
     } catch {
-      // Corrupted cache file, skip displaying cache info
+      // Corrupted cache file, skip
     }
   }
 
-  // Check accumulated bugs
+  // Footer
   const bugStats = getAccumulatedBugsStats(cwd);
   if (bugStats.total > 0) {
-    console.log(chalk.bold('  Accumulated Bugs'));
-    console.log(`  ${chalk.dim('Total:')} ${bugStats.total}`);
-    if (Object.keys(bugStats.bySeverity).length > 0) {
-      for (const [severity, count] of Object.entries(bugStats.bySeverity)) {
-        const color = severity === 'critical' ? 'red' : severity === 'high' ? 'yellow' : severity === 'medium' ? 'blue' : 'dim';
-        console.log(`    ${chalk[color]('●')} ${severity}: ${count}`);
-      }
-    }
-    console.log(`  ${chalk.dim('Last updated:')} ${new Date(bugStats.lastUpdated).toLocaleString()}`);
-    console.log();
-  }
-
-  // Check reports
-  const reportsDir = join(whiterosePath, 'reports');
-  if (existsSync(reportsDir)) {
-    const reports = readdirSync(reportsDir).filter((f) => f.endsWith('.sarif'));
-    if (reports.length > 0) {
-      const latestReport = reports.sort().reverse()[0];
-      const reportPath = join(reportsDir, latestReport);
-      const stats = statSync(reportPath);
-
-      console.log(chalk.bold('  Last Scan'));
-      console.log(`  ${chalk.dim('Report:')} ${latestReport}`);
-      console.log(`  ${chalk.dim('Date:')} ${stats.mtime.toISOString()}`);
-      console.log();
-    }
-  }
-
-  if (bugStats.total > 0) {
-    p.outro(chalk.dim('Run "whiterose fix" to fix bugs, or "whiterose clear" to reset'));
+    console.log(chalk.dim('Run "whiterose fix" to fix bugs, or "whiterose clear" to reset'));
   } else {
-    p.outro(chalk.dim('Run "whiterose scan" to scan for bugs'));
+    console.log(chalk.dim('Run "whiterose scan" to scan for bugs'));
   }
+  console.log();
 }

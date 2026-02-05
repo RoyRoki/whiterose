@@ -274,6 +274,31 @@ export interface AdversarialResult {
 // Scan Result Types
 // ─────────────────────────────────────────────────────────────
 
+export const SeverityBreakdown = z.object({
+  critical: z.number(),
+  high: z.number(),
+  medium: z.number(),
+  low: z.number(),
+  total: z.number(),
+});
+export type SeverityBreakdown = z.infer<typeof SeverityBreakdown>;
+
+export const ScanSummary = z.object({
+  bugs: SeverityBreakdown,
+  smells: SeverityBreakdown,
+  total: z.number(),
+});
+export type ScanSummary = z.infer<typeof ScanSummary>;
+
+export const ScanMeta = z.object({
+  repoName: z.string(),
+  provider: z.string(),
+  duration: z.number(), // ms
+  filesScanned: z.number(),
+  linesOfCode: z.number(),
+});
+export type ScanMeta = z.infer<typeof ScanMeta>;
+
 export const ScanResult = z.object({
   id: z.string(),
   timestamp: z.string().datetime(),
@@ -281,15 +306,9 @@ export const ScanResult = z.object({
   filesScanned: z.number(),
   filesChanged: z.number().optional(),
   duration: z.number(), // ms
+  linesOfCode: z.number().optional(),
   bugs: z.array(Bug),
-  summary: z.object({
-    critical: z.number(),
-    high: z.number(),
-    medium: z.number(),
-    low: z.number(),
-    total: z.number(),
-    bugs: z.number(),
-    smells: z.number(),
-  }),
+  summary: ScanSummary,
+  meta: ScanMeta.optional(),
 });
 export type ScanResult = z.infer<typeof ScanResult>;

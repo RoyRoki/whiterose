@@ -75,13 +75,9 @@ describe('output/markdown', () => {
     timestamp: '2024-01-01T00:00:00Z',
     bugs: mockBugs,
     summary: {
+      bugs: { critical: 1, high: 1, medium: 0, low: 0, total: 2 },
+      smells: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
       total: 2,
-      critical: 1,
-      high: 1,
-      medium: 0,
-      low: 0,
-      bugs: 2,
-      smells: 0,
     },
     scanType: 'full',
     filesScanned: 50,
@@ -100,7 +96,7 @@ describe('output/markdown', () => {
       const md = outputMarkdown(mockScanResult);
 
       expect(md).toContain('## Summary');
-      expect(md).toContain('| Severity | Count |');
+      expect(md).toContain('| | Bugs | Smells |');
       expect(md).toContain('Critical');
       expect(md).toContain('High');
     });
@@ -159,7 +155,11 @@ describe('output/markdown', () => {
       const emptyResult: ScanResult = {
         ...mockScanResult,
         bugs: [],
-        summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, bugs: 0, smells: 0 },
+        summary: {
+          bugs: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
+          smells: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
+          total: 0,
+        },
       };
 
       const md = outputMarkdown(emptyResult);

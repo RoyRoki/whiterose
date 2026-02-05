@@ -63,6 +63,9 @@ export async function reportCommand(options: ReportOptions): Promise<void> {
     status: 'open',
   })) || [];
 
+  const bugItems = bugs.filter((b) => b.kind === 'bug');
+  const smellItems = bugs.filter((b) => b.kind === 'smell');
+
   const result: ScanResult = {
     id: 'report',
     timestamp: new Date().toISOString(),
@@ -71,13 +74,21 @@ export async function reportCommand(options: ReportOptions): Promise<void> {
     duration: 0,
     bugs,
     summary: {
-      critical: bugs.filter((b) => b.kind === 'bug' && b.severity === 'critical').length,
-      high: bugs.filter((b) => b.kind === 'bug' && b.severity === 'high').length,
-      medium: bugs.filter((b) => b.kind === 'bug' && b.severity === 'medium').length,
-      low: bugs.filter((b) => b.kind === 'bug' && b.severity === 'low').length,
+      bugs: {
+        critical: bugItems.filter((b) => b.severity === 'critical').length,
+        high: bugItems.filter((b) => b.severity === 'high').length,
+        medium: bugItems.filter((b) => b.severity === 'medium').length,
+        low: bugItems.filter((b) => b.severity === 'low').length,
+        total: bugItems.length,
+      },
+      smells: {
+        critical: smellItems.filter((b) => b.severity === 'critical').length,
+        high: smellItems.filter((b) => b.severity === 'high').length,
+        medium: smellItems.filter((b) => b.severity === 'medium').length,
+        low: smellItems.filter((b) => b.severity === 'low').length,
+        total: smellItems.length,
+      },
       total: bugs.length,
-      bugs: bugs.filter((b) => b.kind === 'bug').length,
-      smells: bugs.filter((b) => b.kind === 'smell').length,
     },
   };
 

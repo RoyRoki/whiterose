@@ -14,15 +14,15 @@ export function outputMarkdown(result: ScanResult): string {
   // Summary
   lines.push('## Summary');
   lines.push('');
-  lines.push(`| Severity | Count |`);
-  lines.push(`|----------|-------|`);
-  lines.push(`| Critical | ${result.summary.critical} |`);
-  lines.push(`| High | ${result.summary.high} |`);
-  lines.push(`| Medium | ${result.summary.medium} |`);
-  lines.push(`| Low | ${result.summary.low} |`);
-  lines.push(`| **Verified Bugs** | **${result.summary.bugs}** |`);
-  lines.push(`| **Smells** | **${result.summary.smells}** |`);
-  lines.push(`| **Total Findings** | **${result.summary.total}** |`);
+  lines.push(`| | Bugs | Smells |`);
+  lines.push(`|----------|-------|-------|`);
+  lines.push(`| Critical | ${result.summary.bugs.critical} | ${result.summary.smells.critical} |`);
+  lines.push(`| High | ${result.summary.bugs.high} | ${result.summary.smells.high} |`);
+  lines.push(`| Medium | ${result.summary.bugs.medium} | ${result.summary.smells.medium} |`);
+  lines.push(`| Low | ${result.summary.bugs.low} | ${result.summary.smells.low} |`);
+  lines.push(`| **Total** | **${result.summary.bugs.total}** | **${result.summary.smells.total}** |`);
+  lines.push('');
+  lines.push(`**Total Findings:** ${result.summary.total}`);
   lines.push('');
 
   // Scan info

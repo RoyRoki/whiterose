@@ -11,6 +11,7 @@ describe('output/sarif', () => {
       file: 'src/test.ts',
       line: 5,
       endLine: 5,
+      kind: 'bug',
       severity: 'high',
       category: 'null-reference',
       confidence: {
@@ -40,6 +41,7 @@ describe('output/sarif', () => {
       evidence: ['No null check before access'],
       suggestedFix: 'return user?.name;',
       createdAt: '2024-01-01T00:00:00Z',
+      status: 'open',
     },
     {
       id: 'WR-002',
@@ -47,8 +49,9 @@ describe('output/sarif', () => {
       description: 'Potential race condition in async code',
       file: 'src/async.ts',
       line: 10,
+      kind: 'bug',
       severity: 'critical',
-      category: 'async-race-condition',
+      category: 'async-issue',
       confidence: {
         overall: 'medium',
         codePathValidity: 0.7,
@@ -60,15 +63,22 @@ describe('output/sarif', () => {
       codePath: [],
       evidence: ['Shared state accessed without synchronization'],
       createdAt: '2024-01-01T00:00:00Z',
+      status: 'open',
     },
   ];
 
   const mockScanResult: ScanResult = {
-    bugs: mockBugs,
-    scannedFiles: 10,
-    skippedFiles: 2,
-    duration: 5000,
+    id: 'scan-test',
     timestamp: '2024-01-01T00:00:00Z',
+    scanType: 'full',
+    filesScanned: 10,
+    duration: 5000,
+    bugs: mockBugs,
+    summary: {
+      bugs: { critical: 1, high: 1, medium: 0, low: 0, total: 2 },
+      smells: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
+      total: 2,
+    },
   };
 
   describe('outputSarif', () => {
@@ -134,7 +144,7 @@ describe('output/sarif', () => {
 
       const rules = sarif.runs[0].tool.driver.rules;
       expect(rules.some(r => r.id === 'null-reference')).toBe(true);
-      expect(rules.some(r => r.id === 'async-race-condition')).toBe(true);
+      expect(rules.some(r => r.id === 'async-issue')).toBe(true);
     });
 
     it('should handle empty bug list', () => {

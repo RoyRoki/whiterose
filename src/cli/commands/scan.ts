@@ -1,9 +1,9 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
-import { existsSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, writeFileSync, readFileSync } from 'fs';
+import { join, relative, basename } from 'path';
 import fg from 'fast-glob';
-import { WhiteroseConfig, ScanResult, Bug, ConfidenceLevel, ProviderType } from '../../types.js';
+import { WhiteroseConfig, ScanResult, Bug, ConfidenceLevel, ProviderType, ScanMeta, ScanSummary } from '../../types.js';
 import { loadConfig, loadUnderstanding } from '../../core/config.js';
 import { CoreScanner } from '../../core/scanner.js';
 import { getExecutor } from '../../providers/executors/index.js';
@@ -17,6 +17,8 @@ import { mergeBugs } from '../../core/bug-merger.js';
 import { analyzeCrossFile } from '../../core/cross-file-analyzer.js';
 import { analyzeContracts } from '../../core/contract-analyzer.js';
 import { analyzeIntentContracts, classifyFindings } from '../../core/findings.js';
+import { formatDuration } from '../components/progress.js';
+import { renderScanCard, CardData } from '../components/card.js';
 
 interface ScanOptions {
   full: boolean;
@@ -31,9 +33,51 @@ interface ScanOptions {
   phase?: 'unit' | 'integration' | 'e2e' | 'all'; // Which analysis phase to run
 }
 
+/**
+ * Get repository name from git or directory name
+ */
+function getRepoName(cwd: string): string {
+  try {
+    const gitConfigPath = join(cwd, '.git', 'config');
+    if (existsSync(gitConfigPath)) {
+      const config = readFileSync(gitConfigPath, 'utf-8');
+      const match = config.match(/url\s*=\s*.*[/:]([^/]+?)(?:\.git)?$/m);
+      if (match) return match[1];
+    }
+  } catch {
+    // Fall through to basename
+  }
+  return basename(cwd);
+}
+
+/**
+ * Count lines of code in files
+ */
+async function countLinesOfCode(cwd: string, files: string[]): Promise<number> {
+  let total = 0;
+  for (const file of files.slice(0, 500)) { // Limit to first 500 for performance
+    try {
+      const content = readFileSync(join(cwd, file), 'utf-8');
+      const lines = content.split('\n').filter(line => {
+        const trimmed = line.trim();
+        return trimmed.length > 0 &&
+               !trimmed.startsWith('//') &&
+               !trimmed.startsWith('/*') &&
+               !trimmed.startsWith('*');
+      });
+      total += lines.length;
+    } catch {
+      // Skip unreadable files
+    }
+  }
+  return total;
+}
+
 export async function scanCommand(paths: string[], options: ScanOptions): Promise<void> {
+  const scanStartTime = Date.now();
   const cwd = process.cwd();
   const whiterosePath = join(cwd, '.whiterose');
+  const repoName = getRepoName(cwd);
 
   // Quick scan mode: works without init, uses changed files only
   const isQuickScan = options.quick || options.ci;
@@ -51,8 +95,10 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   }
 
   if (!isQuiet) {
-    const scanMode = isQuickScan ? 'quick scan (pre-commit)' : 'thorough scan';
-    p.intro(chalk.red('whiterose') + chalk.dim(` - ${scanMode}`));
+    const scanMode = isQuickScan ? 'quick' : 'full';
+    console.log();
+    console.log(chalk.red.bold('whiterose') + chalk.dim(` v1.0.9 | ${scanMode} scan`));
+    console.log();
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -111,29 +157,20 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   if (options.full || paths.length > 0) {
     scanType = 'full';
     if (!isQuiet) {
-      const spinner = p.spinner();
-      spinner.start('Scanning files...');
-      if (paths.length > 0) {
-        // Expand glob patterns in provided paths
-        filesToScan = await fg(paths, {
-          cwd,
-          ignore: ['node_modules/**', 'dist/**', 'build/**', '.next/**'],
-          absolute: false,
-        });
-      } else {
-        filesToScan = await scanCodebase(cwd, config);
-      }
-      spinner.stop(`Found ${filesToScan.length} files to scan`);
+      console.log(chalk.dim('\u2502') + ' Discovering files...');
+    }
+    if (paths.length > 0) {
+      // Expand glob patterns in provided paths
+      filesToScan = await fg(paths, {
+        cwd,
+        ignore: ['node_modules/**', 'dist/**', 'build/**', '.next/**'],
+        absolute: false,
+      });
     } else {
-      if (paths.length > 0) {
-        filesToScan = await fg(paths, {
-          cwd,
-          ignore: ['node_modules/**', 'dist/**', 'build/**', '.next/**'],
-          absolute: false,
-        });
-      } else {
-        filesToScan = await scanCodebase(cwd, config);
-      }
+      filesToScan = await scanCodebase(cwd, config);
+    }
+    if (!isQuiet) {
+      console.log(chalk.dim('\u2502') + ` Found ${chalk.cyan(filesToScan.length)} files`);
     }
   } else {
     // Incremental scan requires config
@@ -167,12 +204,11 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   // ─────────────────────────────────────────────────────────────
   let staticResults;
   if (!isQuiet) {
-    const staticSpinner = p.spinner();
-    staticSpinner.start('Running static analysis (tsc, eslint)...');
-    staticResults = await runStaticAnalysis(cwd, filesToScan, config);
-    staticSpinner.stop(`Static analysis: ${staticResults.length} signals found`);
-  } else {
-    staticResults = await runStaticAnalysis(cwd, filesToScan, config);
+    console.log(chalk.dim('\u2502') + ' Running static analysis (tsc, eslint)...');
+  }
+  staticResults = await runStaticAnalysis(cwd, filesToScan, config);
+  if (!isQuiet) {
+    console.log(chalk.dim('\u2502') + ` Static analysis: ${chalk.cyan(staticResults.length)} signals`);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -193,38 +229,33 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
 
   let bugs: Bug[];
   if (!isQuiet) {
-    const llmSpinner = p.spinner();
-    const analysisStartTime = Date.now();
-    llmSpinner.start(`Analyzing with ${providerName}...`);
+    console.log(chalk.dim('\u2502'));
+    console.log(chalk.cyan('\u2550\u2550\u2550 Analyzing with ' + providerName + ' \u2550\u2550\u2550'));
+    console.log();
 
-    // Create scanner with progress callback
+    // Create scanner with progress callback (additive output, no clearing)
     const scanner = new CoreScanner(executor, {}, {
       onProgress: (message: string) => {
-        // Stop spinner and print all progress messages
-        // This ensures users see batch status, pass results, etc.
         if (message.trim()) {
-          llmSpinner.stop('');
-
           // Color code based on content
-          if (message.includes('════')) {
+          if (message.includes('\u2550\u2550\u2550\u2550')) {
             console.log(chalk.cyan(message));
-          } else if (message.includes('✓')) {
+          } else if (message.includes('\u2713')) {
             console.log(chalk.green(message));
-          } else if (message.includes('✗')) {
+          } else if (message.includes('\u2717')) {
             console.log(chalk.red(message));
           } else if (message.includes('[Batch')) {
             console.log(chalk.yellow(message));
           } else {
             console.log(chalk.dim(message));
           }
-
-          llmSpinner.start('Scanning...');
         }
       },
       onBugFound: (bug: Bug) => {
-        llmSpinner.stop('');
-        console.log(chalk.magenta(`  ★ Found: ${bug.title} (${bug.severity})`));
-        llmSpinner.start('Scanning...');
+        const severityColor = bug.severity === 'critical' ? chalk.red :
+                             bug.severity === 'high' ? chalk.yellow :
+                             bug.severity === 'medium' ? chalk.blue : chalk.dim;
+        console.log(chalk.magenta('\u2605') + ` ${severityColor('[' + bug.severity + ']')} ${bug.title}`);
       },
     });
 
@@ -245,13 +276,14 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
           config,
         });
       }
-      const totalTime = Math.floor((Date.now() - analysisStartTime) / 1000);
-      llmSpinner.stop(`Found ${bugs.length} potential bugs (${totalTime}s)`);
+
+      console.log();
+      console.log(chalk.dim('\u2502') + ` Found ${chalk.cyan(bugs.length)} potential bugs`);
 
       // Check for pass errors - warn user if some passes failed
       if (scanner.hasPassErrors()) {
         const errors = scanner.getPassErrors();
-        p.log.warn(`${errors.length} analysis pass(es) failed:`);
+        console.log(chalk.yellow('\u26a0') + ` ${errors.length} analysis pass(es) failed:`);
         for (const err of errors.slice(0, 5)) {
           console.log(chalk.yellow(`  - ${err.passName}: ${err.error}`));
         }
@@ -260,8 +292,8 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
         }
       }
     } catch (error) {
-      llmSpinner.stop('Analysis failed');
-      p.log.error(String(error));
+      console.log(chalk.red('\u2717') + ' Analysis failed');
+      console.error(String(error));
       process.exit(1);
     }
   } else {
@@ -307,33 +339,28 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   // ─────────────────────────────────────────────────────────────
   if (!isQuickScan) {
     if (!isQuiet) {
-      const crossFileSpinner = p.spinner();
-      crossFileSpinner.start('Running cross-file analysis...');
-      try {
-        const crossFileBugs = await analyzeCrossFile(cwd);
-        if (crossFileBugs.length > 0) {
-          bugs.push(...crossFileBugs);
-          crossFileSpinner.stop(`Cross-file analysis: ${crossFileBugs.length} issues found`);
-        } else {
-          crossFileSpinner.stop('Cross-file analysis: no issues');
-        }
-      } catch {
-        crossFileSpinner.stop('Cross-file analysis: skipped');
-      }
-    } else {
-      try {
-        const crossFileBugs = await analyzeCrossFile(cwd);
+      console.log(chalk.dim('\u2502') + ' Running cross-file analysis...');
+    }
+    try {
+      const crossFileBugs = await analyzeCrossFile(cwd);
+      if (crossFileBugs.length > 0) {
         bugs.push(...crossFileBugs);
-      } catch (err) {
-        // In CI mode, surface analysis failures so they don't go unnoticed
-        if (options.ci) {
-          console.error(JSON.stringify({
-            error: 'Cross-file analysis failed',
-            message: err instanceof Error ? err.message : String(err),
-          }));
-          process.exit(1);
+        if (!isQuiet) {
+          console.log(chalk.dim('\u2502') + ` Cross-file: ${chalk.cyan(crossFileBugs.length)} issues`);
         }
-        // For non-CI quiet modes (--json, --sarif), skip silently
+      } else if (!isQuiet) {
+        console.log(chalk.dim('\u2502') + ' Cross-file: no issues');
+      }
+    } catch (err) {
+      if (!isQuiet) {
+        console.log(chalk.dim('\u2502') + chalk.dim(' Cross-file: skipped'));
+      } else if (options.ci) {
+        // In CI mode, surface analysis failures so they don't go unnoticed
+        console.error(JSON.stringify({
+          error: 'Cross-file analysis failed',
+          message: err instanceof Error ? err.message : String(err),
+        }));
+        process.exit(1);
       }
     }
   }
@@ -343,33 +370,28 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   // ─────────────────────────────────────────────────────────────
   if (!isQuickScan) {
     if (!isQuiet) {
-      const contractSpinner = p.spinner();
-      contractSpinner.start('Running contract analysis...');
-      try {
-        const contractBugs = await analyzeContracts(cwd);
-        if (contractBugs.length > 0) {
-          bugs.push(...contractBugs);
-          contractSpinner.stop(`Contract analysis: ${contractBugs.length} issues found`);
-        } else {
-          contractSpinner.stop('Contract analysis: no issues');
-        }
-      } catch {
-        contractSpinner.stop('Contract analysis: skipped');
-      }
-    } else {
-      try {
-        const contractBugs = await analyzeContracts(cwd);
+      console.log(chalk.dim('\u2502') + ' Running contract analysis...');
+    }
+    try {
+      const contractBugs = await analyzeContracts(cwd);
+      if (contractBugs.length > 0) {
         bugs.push(...contractBugs);
-      } catch (err) {
-        // In CI mode, surface analysis failures so they don't go unnoticed
-        if (options.ci) {
-          console.error(JSON.stringify({
-            error: 'Contract analysis failed',
-            message: err instanceof Error ? err.message : String(err),
-          }));
-          process.exit(1);
+        if (!isQuiet) {
+          console.log(chalk.dim('\u2502') + ` Contract: ${chalk.cyan(contractBugs.length)} issues`);
         }
-        // For non-CI quiet modes (--json, --sarif), skip silently
+      } else if (!isQuiet) {
+        console.log(chalk.dim('\u2502') + ' Contract: no issues');
+      }
+    } catch (err) {
+      if (!isQuiet) {
+        console.log(chalk.dim('\u2502') + chalk.dim(' Contract: skipped'));
+      } else if (options.ci) {
+        // In CI mode, surface analysis failures so they don't go unnoticed
+        console.error(JSON.stringify({
+          error: 'Contract analysis failed',
+          message: err instanceof Error ? err.message : String(err),
+        }));
+        process.exit(1);
       }
     }
   }
@@ -443,25 +465,52 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
   const allBugs = mergeResult.bugs;
 
   // ─────────────────────────────────────────────────────────────
-  // Create scan result
+  // Calculate LoC and create scan result
   // ─────────────────────────────────────────────────────────────
+  const linesOfCode = await countLinesOfCode(cwd, filesToScan);
+  const scanDuration = Date.now() - scanStartTime;
+
+  // Separate bugs and smells with severity breakdown
+  const bugItems = allBugs.filter((b) => b.kind === 'bug');
+  const smellItems = allBugs.filter((b) => b.kind === 'smell');
+
+  const summary: ScanSummary = {
+    bugs: {
+      critical: bugItems.filter((b) => b.severity === 'critical').length,
+      high: bugItems.filter((b) => b.severity === 'high').length,
+      medium: bugItems.filter((b) => b.severity === 'medium').length,
+      low: bugItems.filter((b) => b.severity === 'low').length,
+      total: bugItems.length,
+    },
+    smells: {
+      critical: smellItems.filter((b) => b.severity === 'critical').length,
+      high: smellItems.filter((b) => b.severity === 'high').length,
+      medium: smellItems.filter((b) => b.severity === 'medium').length,
+      low: smellItems.filter((b) => b.severity === 'low').length,
+      total: smellItems.length,
+    },
+    total: allBugs.length,
+  };
+
+  const meta: ScanMeta = {
+    repoName,
+    provider: providerName,
+    duration: scanDuration,
+    filesScanned: filesToScan.length,
+    linesOfCode,
+  };
+
   const result: ScanResult = {
     id: `scan-${Date.now()}`,
     timestamp: new Date().toISOString(),
     scanType,
     filesScanned: filesToScan.length,
     filesChanged: scanType === 'incremental' ? filesToScan.length : undefined,
-    duration: 0, // TODO: track actual duration
-    bugs: allBugs, // Use accumulated bugs (union across all scans)
-    summary: {
-      critical: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'critical').length,
-      high: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'high').length,
-      medium: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'medium').length,
-      low: allBugs.filter((b) => b.kind === 'bug' && b.severity === 'low').length,
-      total: allBugs.length,
-      bugs: allBugs.filter((b) => b.kind === 'bug').length,
-      smells: allBugs.filter((b) => b.kind === 'smell').length,
-    },
+    duration: scanDuration,
+    linesOfCode,
+    bugs: allBugs,
+    summary,
+    meta,
   };
 
   // ─────────────────────────────────────────────────────────────
@@ -480,13 +529,13 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     // JSON output (default for CI mode)
     console.log(JSON.stringify(result, null, 2));
     // CI mode: exit with code 1 if bugs found
-    if (options.ci && result.summary.bugs > 0) {
+    if (options.ci && result.summary.bugs.total > 0) {
       process.exit(1);
     }
   } else if (options.sarif) {
     console.log(JSON.stringify(outputSarif(result), null, 2));
     // CI mode: exit with code 1 if bugs found
-    if (options.ci && result.summary.bugs > 0) {
+    if (options.ci && result.summary.bugs.total > 0) {
       process.exit(1);
     }
   } else {
@@ -523,39 +572,30 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     const jsonPath = join(outputDir, 'bugs.json');
     writeFileSync(jsonPath, JSON.stringify(result, null, 2));
 
+    // 5. Save last scan for status command
+    const lastScanPath = join(whiterosePath, 'last-scan.json');
+    writeFileSync(lastScanPath, JSON.stringify(result, null, 2));
+
     // Also save to reports directory with timestamp for history
     writeFileSync(join(reportsDir, `${timestamp}.sarif`), JSON.stringify(outputSarif(result), null, 2));
 
-    // Show summary
+    // Show the card
     console.log();
-    p.log.message(chalk.bold('Scan Results'));
-    console.log();
-    console.log(`  ${chalk.red('●')} Critical: ${result.summary.critical}`);
-    console.log(`  ${chalk.yellow('●')} High: ${result.summary.high}`);
-    console.log(`  ${chalk.blue('●')} Medium: ${result.summary.medium}`);
-    console.log(`  ${chalk.dim('●')} Low: ${result.summary.low}`);
-    console.log();
-    if (newBugsThisScan > 0) {
-      console.log(`  ${chalk.green('+')} New this scan: ${newBugsThisScan}`);
-    }
-    console.log(
-      `  ${chalk.bold('Total findings:')} ${result.summary.total} ` +
-      `(bugs: ${result.summary.bugs}, smells: ${result.summary.smells})`
-    );
+    const cardData: CardData = {
+      meta,
+      bugs: summary.bugs,
+      smells: summary.smells,
+      reportPath: './' + relative(cwd, humanPath),
+    };
+    console.log(renderScanCard(cardData));
     console.log();
 
-    // Show saved files
-    p.log.success('Reports saved:');
-    console.log(`  ${chalk.dim('├')} ${chalk.cyan(humanPath)} ${chalk.dim('(tester-friendly)')}`);
-    console.log(`  ${chalk.dim('├')} ${chalk.cyan(mdPath)} ${chalk.dim('(technical)')}`);
-    console.log(`  ${chalk.dim('├')} ${chalk.cyan(sarifPath)}`);
-    console.log(`  ${chalk.dim('└')} ${chalk.cyan(jsonPath)}`);
+    // Show relative paths for reports
+    console.log(chalk.dim('Reports:'));
+    console.log(`  ${chalk.dim('\u251c')} ${chalk.cyan('./' + relative(cwd, humanPath))} ${chalk.dim('(tester-friendly)')}`);
+    console.log(`  ${chalk.dim('\u251c')} ${chalk.cyan('./' + relative(cwd, mdPath))} ${chalk.dim('(technical)')}`);
+    console.log(`  ${chalk.dim('\u251c')} ${chalk.cyan('./' + relative(cwd, sarifPath))}`);
+    console.log(`  ${chalk.dim('\u2514')} ${chalk.cyan('./' + relative(cwd, jsonPath))}`);
     console.log();
-
-    if (result.summary.total > 0) {
-      p.log.info(`Run ${chalk.cyan('whiterose fix')} to fix bugs interactively.`);
-    }
-
-    p.outro(chalk.green('Scan complete'));
   }
 }
