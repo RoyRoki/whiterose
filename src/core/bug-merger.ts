@@ -156,6 +156,9 @@ export function loadAccumulatedBugs(cwd: string): StoredBugList {
     if (!Array.isArray(stored.bugs)) {
       stored.bugs = [];
     }
+    if (!stored.fingerprints || typeof stored.fingerprints !== 'object') {
+      stored.fingerprints = {};
+    }
     stored.bugs = stored.bugs.map((b) => ({ ...b, kind: b.kind || 'bug' }));
     return stored;
   } catch (error) {
