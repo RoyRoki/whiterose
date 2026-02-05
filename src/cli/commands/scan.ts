@@ -64,8 +64,21 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
     try {
       config = await loadConfig(cwd);
       understanding = await loadUnderstanding(cwd);
-    } catch {
-      // For quick scan, we can continue without config
+    } catch (err) {
+      // Config load failed - warn user that defaults will be used
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (!isQuiet) {
+        p.log.warn(`Failed to load config: ${errorMessage}`);
+        p.log.info('Continuing with default settings. Run "whiterose init" to fix.');
+      } else if (options.ci) {
+        // In CI mode, config parse errors should fail the build
+        console.error(JSON.stringify({
+          error: 'Config parse error',
+          message: errorMessage,
+          hint: 'Fix config.yml or run "whiterose init" to regenerate'
+        }));
+        process.exit(1);
+      }
     }
   }
 
@@ -216,6 +229,18 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
       }
       const totalTime = Math.floor((Date.now() - analysisStartTime) / 1000);
       llmSpinner.stop(`Found ${bugs.length} potential bugs (${totalTime}s)`);
+
+      // Check for pass errors - warn user if some passes failed
+      if (scanner.hasPassErrors()) {
+        const errors = scanner.getPassErrors();
+        p.log.warn(`${errors.length} analysis pass(es) failed:`);
+        for (const err of errors.slice(0, 5)) {
+          console.log(chalk.yellow(`  - ${err.passName}: ${err.error}`));
+        }
+        if (errors.length > 5) {
+          console.log(chalk.yellow(`  ... and ${errors.length - 5} more`));
+        }
+      }
     } catch (error) {
       llmSpinner.stop('Analysis failed');
       p.log.error(String(error));
@@ -238,6 +263,21 @@ export async function scanCommand(paths: string[], options: ScanOptions): Promis
         staticResults: staticResults || [],
         config,
       });
+    }
+
+    // In CI mode, if ALL passes failed and we have no bugs, exit with error
+    // This prevents silent failures from being reported as successful scans
+    if (options.ci && scanner.hasPassErrors()) {
+      const errors = scanner.getPassErrors();
+      // If we have some bugs despite errors, continue (partial success)
+      // But if we have 0 bugs and errors occurred, that's a scan failure
+      if (bugs.length === 0) {
+        console.error(JSON.stringify({
+          error: 'Analysis failed',
+          passErrors: errors,
+        }));
+        process.exit(1);
+      }
     }
   }
 
